@@ -21,9 +21,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.settingsWindowController = settingsWindowController
         self.statusMenuController = statusMenuController
         appModel.start()
+
+        if appModel.requiresSetup {
+            settingsWindowController.show()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         appModel.stop()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        settingsWindowController?.show()
+        return true
     }
 }

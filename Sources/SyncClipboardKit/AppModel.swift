@@ -121,6 +121,10 @@ public final class AppModel: ObservableObject {
         await realtimeClient.pollNow()
     }
 
+    public var requiresSetup: Bool {
+        buildServerConfiguration() == nil
+    }
+
     private func applyRuntimeConfiguration(forceRefresh: Bool) async {
         let configuration = buildServerConfiguration()
         httpClient.updateConfiguration(configuration)

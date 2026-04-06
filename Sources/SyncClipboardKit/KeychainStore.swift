@@ -4,7 +4,7 @@ import Security
 public final class KeychainStore {
     private let service: String
 
-    public init(service: String = "xyz.jericx.SyncClipboard") {
+    public init(service: String = "xyz.jericx.SyncClipboard-Swift") {
         self.service = service
     }
 

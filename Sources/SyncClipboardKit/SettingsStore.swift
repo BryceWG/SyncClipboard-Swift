@@ -30,7 +30,7 @@ public final class SettingsStore {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support", isDirectory: true)
         return appSupport
-            .appendingPathComponent("SyncClipboard", isDirectory: true)
+            .appendingPathComponent("SyncClipboard-Swift", isDirectory: true)
             .appendingPathComponent("AppSettings.json", isDirectory: false)
     }
 }

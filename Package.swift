@@ -13,7 +13,7 @@ let package = Package(
             targets: ["SyncClipboardKit"]
         ),
         .executable(
-            name: "SyncClipboard",
+            name: "SyncClipboard-Swift",
             targets: ["SyncClipboardApp"]
         ),
     ],

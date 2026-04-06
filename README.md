@@ -44,7 +44,7 @@ The current implementation uses polling for remote updates in the SwiftPM build.
 
 ```bash
 swift test
-swift run SyncClipboard
+swift run SyncClipboard-Swift
 ```
 
 ## Package
@@ -58,11 +58,11 @@ zsh build/macos/package_app.sh
 The script:
 
 - archives the Swift package with `xcodebuild`
-- wraps the archived universal binary in `SyncClipboard.app`
+- wraps the archived universal binary in `SyncClipboard-Swift.app`
 - injects `Info.plist` and the macOS icon
 - applies ad-hoc signing
-- emits `dist/SyncClipboard.app`
-- emits `dist/SyncClipboard-0.1.0-macOS.zip`
+- emits `dist/SyncClipboard-Swift.app`
+- emits `dist/SyncClipboard-Swift-0.1.0-macOS.zip`
 
 You can override versions at packaging time:
 

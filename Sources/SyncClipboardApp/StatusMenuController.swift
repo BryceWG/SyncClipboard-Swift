@@ -19,7 +19,18 @@ final class StatusMenuController {
         self.appModel = appModel
         self.openSettings = openSettings
 
-        statusItem.button?.title = "SyncClipboard"
+        if let button = statusItem.button {
+            if let image = NSImage(
+                systemSymbolName: "arrow.left.arrow.right.circle.fill",
+                accessibilityDescription: "SyncClipboard-Swift"
+            ) {
+                image.isTemplate = true
+                button.image = image
+            } else {
+                button.title = "SC"
+            }
+            button.toolTip = "SyncClipboard-Swift"
+        }
 
         syncToggleItem.target = self
         syncNowItem.target = self
