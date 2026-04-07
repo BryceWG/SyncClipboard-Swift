@@ -30,13 +30,22 @@ public final class SyncClipboardHTTPClient {
 
     public func testConnection() async throws {
         let configuration = try requireConfiguration()
-        let request = Self.makeRequest(
+        let auth = ServerAuth(username: configuration.username, password: configuration.password)
+
+        let timeRequest = Self.makeRequest(
             baseURL: configuration.baseURL,
             path: "api/time",
             method: "GET",
-            auth: ServerAuth(username: configuration.username, password: configuration.password)
+            auth: auth
         )
-        _ = try await perform(request)
+        _ = try await perform(timeRequest)
+
+        let hubRequest = Self.makeRequest(
+            url: SignalRConnectionMetadata.hubNegotiateURL(for: configuration.baseURL),
+            method: "POST",
+            auth: auth
+        )
+        _ = try await perform(hubRequest)
     }
 
     public func fetchCurrentProfile() async throws -> ProfileDTO {
@@ -102,7 +111,16 @@ public final class SyncClipboardHTTPClient {
     ) -> URLRequest {
         let baseString = baseURL.absoluteString.hasSuffix("/") ? baseURL.absoluteString : baseURL.absoluteString + "/"
         let url = URL(string: baseString + path) ?? baseURL.appending(path: path)
+        return makeRequest(url: url, method: method, auth: auth, body: body, contentType: contentType)
+    }
 
+    public static func makeRequest(
+        url: URL,
+        method: String,
+        auth: ServerAuth,
+        body: Data? = nil,
+        contentType: String? = nil
+    ) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body

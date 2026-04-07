@@ -20,7 +20,7 @@ public final class AppModel: ObservableObject {
     private let keychainStore: KeychainStore
     private let httpClient: SyncClipboardHTTPClient
     private let clipboardService: ClipboardService
-    private let realtimeClient: PollingRealtimeClient
+    private let realtimeClient: any RealtimeClient
     private let coordinator: SyncCoordinator
     private let launchAtLoginManager = LaunchAtLoginManager()
 
@@ -46,7 +46,7 @@ public final class AppModel: ObservableObject {
         self.showNotifications = loadedSettings.showNotifications
 
         let notifier = UserNotifier()
-        self.realtimeClient = PollingRealtimeClient(httpClient: httpClient)
+        self.realtimeClient = RealtimeClientFactory.make(httpClient: httpClient)
         self.coordinator = SyncCoordinator(httpClient: httpClient, notifier: notifier)
 
         self.clipboardMonitor.onChange = { [weak self] in

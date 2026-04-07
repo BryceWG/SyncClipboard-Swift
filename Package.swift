@@ -17,14 +17,19 @@ let package = Package(
             targets: ["SyncClipboardApp"]
         ),
     ],
-    dependencies: [],
+    dependencies: [
+        .package(url: "https://github.com/dotnet/signalr-client-swift", .upToNextMinor(from: "1.0.0")),
+    ],
     targets: [
         .executableTarget(
             name: "SyncClipboardApp",
             dependencies: ["SyncClipboardKit"]
         ),
         .target(
-            name: "SyncClipboardKit"
+            name: "SyncClipboardKit",
+            dependencies: [
+                .product(name: "SignalRClient", package: "signalr-client-swift"),
+            ]
         ),
         .testTarget(
             name: "SyncClipboardTests",

@@ -37,8 +37,10 @@ This client keeps compatibility with the current self-hosted SyncClipboard serve
 - `PUT /SyncClipboard.json`
 - `GET /file/{dataName}`
 - `PUT /file/{dataName}`
+- `GET/POST /SyncClipboardHub/negotiate`
+- `WS/SSE/LongPolling /SyncClipboardHub`
 
-The current implementation uses polling for remote updates in the SwiftPM build. The library boundary is prepared so a SignalR-backed realtime client can be dropped in without changing sync coordination.
+The current implementation uses the official Swift SignalR client for realtime remote updates and keeps a one-shot HTTP refresh path for explicit manual syncs.
 
 ## Build
 
