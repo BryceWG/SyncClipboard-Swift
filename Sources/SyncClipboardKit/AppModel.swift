@@ -1,6 +1,11 @@
 import Combine
 import Foundation
 
+struct RealtimePresentationState: Equatable {
+    let connectionStatusText: String
+    let errorText: String
+}
+
 @MainActor
 public final class AppModel: ObservableObject {
     @Published public var serverURL: String
@@ -227,19 +232,9 @@ public final class AppModel: ObservableObject {
     }
 
     private func applyRealtimeState(_ state: RealtimeState) {
-        switch state {
-        case .disconnected:
-            connectionStatusText = "Disconnected"
-        case .connecting:
-            connectionStatusText = "Connecting"
-        case .connected:
-            connectionStatusText = "Connected"
-        case .reconnecting:
-            connectionStatusText = "Reconnecting"
-        case .error(let message):
-            connectionStatusText = "Error"
-            lastErrorText = message
-        }
+        let presentation = Self.realtimePresentationState(for: state)
+        connectionStatusText = presentation.connectionStatusText
+        lastErrorText = presentation.errorText
     }
 
     private func applyDiagnostics(_ diagnostics: SyncDiagnostics) {
@@ -298,4 +293,19 @@ public final class AppModel: ObservableObject {
         formatter.unitsStyle = .full
         return formatter
     }()
+
+    nonisolated static func realtimePresentationState(for state: RealtimeState) -> RealtimePresentationState {
+        switch state {
+        case .disconnected:
+            return RealtimePresentationState(connectionStatusText: "Disconnected", errorText: "")
+        case .connecting:
+            return RealtimePresentationState(connectionStatusText: "Connecting", errorText: "")
+        case .connected:
+            return RealtimePresentationState(connectionStatusText: "Connected", errorText: "")
+        case .reconnecting:
+            return RealtimePresentationState(connectionStatusText: "Reconnecting", errorText: "")
+        case .error(let message):
+            return RealtimePresentationState(connectionStatusText: "Error", errorText: message)
+        }
+    }
 }

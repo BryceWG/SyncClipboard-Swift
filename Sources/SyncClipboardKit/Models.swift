@@ -28,8 +28,10 @@ public enum RemoteReceiveMode: String, Codable, Equatable, Sendable, CaseIterabl
 
     static func fromLegacyTransportRawValue(_ rawValue: String?) -> Self? {
         switch rawValue {
-        case "automatic", "webSockets", "serverSentEvents", "longPolling":
+        case "automatic", "webSockets", "serverSentEvents":
             return .realtime
+        case "longPolling":
+            return .polling
         default:
             return nil
         }

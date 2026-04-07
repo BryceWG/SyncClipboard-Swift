@@ -114,6 +114,21 @@ final class SyncClipboardTests: XCTestCase {
         XCTAssertFalse(tracker.shouldUpload(remote))
     }
 
+    func testRealtimePresentationStateClearsErrorAfterRecovery() {
+        XCTAssertEqual(
+            AppModel.realtimePresentationState(for: .error("network down")),
+            RealtimePresentationState(connectionStatusText: "Error", errorText: "network down")
+        )
+        XCTAssertEqual(
+            AppModel.realtimePresentationState(for: .connected),
+            RealtimePresentationState(connectionStatusText: "Connected", errorText: "")
+        )
+        XCTAssertEqual(
+            AppModel.realtimePresentationState(for: .reconnecting),
+            RealtimePresentationState(connectionStatusText: "Reconnecting", errorText: "")
+        )
+    }
+
     func testSignalRHubURLUsesOfficialHubPath() {
         let baseURL = URL(string: "https://example.com/sync/")!
 
@@ -185,8 +200,35 @@ final class SyncClipboardTests: XCTestCase {
         let longPollingSettings = try JSONDecoder().decode(AppSettings.self, from: legacyLongPollingJSON)
         let realtimeSettings = try JSONDecoder().decode(AppSettings.self, from: legacyRealtimeJSON)
 
-        XCTAssertEqual(longPollingSettings.receiveMode, .realtime)
+        XCTAssertEqual(longPollingSettings.receiveMode, .polling)
         XCTAssertEqual(realtimeSettings.receiveMode, .realtime)
+    }
+
+    func testSettingsStoreRoundTripsPollingConfiguration() throws {
+        let temporaryDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let fileURL = temporaryDirectory.appendingPathComponent("AppSettings.json", isDirectory: false)
+        let store = SettingsStore(fileURL: fileURL)
+        let original = AppSettings(
+            serverURL: "https://example.com/sync",
+            username: "alice",
+            keychainAccount: "primary",
+            syncEnabled: true,
+            launchAtLogin: true,
+            showNotifications: false,
+            showDockIcon: false,
+            receiveMode: .polling,
+            pollingIntervalSeconds: 2.5,
+            autoReconnect: false
+        )
+
+        try store.save(original)
+        let loaded = try store.load()
+
+        XCTAssertEqual(loaded, original)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+
+        try? FileManager.default.removeItem(at: temporaryDirectory)
     }
 
     func testAppSettingsClampPollingInterval() throws {
