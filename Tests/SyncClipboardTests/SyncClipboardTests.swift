@@ -50,6 +50,82 @@ private final class RequestLog: @unchecked Sendable {
     }
 }
 
+@MainActor
+private final class FakeClipboardService: ClipboardServicing {
+    private(set) var writtenSnapshots: [ClipboardSnapshot] = []
+    var nextSnapshot: ClipboardSnapshot?
+
+    func readCurrentSnapshot() throws -> ClipboardSnapshot? {
+        nextSnapshot
+    }
+
+    func write(_ snapshot: ClipboardSnapshot) throws {
+        writtenSnapshots.append(snapshot)
+    }
+}
+
+private final class FakeSettingsStore: SettingsStoring {
+    private let onSave: (AppSettings) throws -> Void
+    private(set) var savedSettings: [AppSettings] = []
+
+    init(onSave: @escaping (AppSettings) throws -> Void = { _ in }) {
+        self.onSave = onSave
+    }
+
+    func load() throws -> AppSettings {
+        AppSettings()
+    }
+
+    func save(_ settings: AppSettings) throws {
+        savedSettings.append(settings)
+        try onSave(settings)
+    }
+}
+
+private final class FakeKeychainStore: KeychainStoring {
+    private let onSave: (String, String) throws -> Void
+    private(set) var savedPasswords: [(account: String, password: String)] = []
+
+    init(onSave: @escaping (String, String) throws -> Void = { _, _ in }) {
+        self.onSave = onSave
+    }
+
+    func readPassword(account: String) throws -> String? {
+        nil
+    }
+
+    func savePassword(_ password: String, account: String) throws {
+        savedPasswords.append((account: account, password: password))
+        try onSave(password, account)
+    }
+
+    func deletePassword(account: String) throws {}
+}
+
+@MainActor
+private final class FakeLaunchAtLoginManager: LaunchAtLoginManaging {
+    var status: LaunchAtLoginStatus
+    private let nextStatusAfterSet: LaunchAtLoginStatus?
+    private(set) var requestedValues: [Bool] = []
+
+    init(
+        status: LaunchAtLoginStatus = .disabled,
+        nextStatusAfterSet: LaunchAtLoginStatus? = nil
+    ) {
+        self.status = status
+        self.nextStatusAfterSet = nextStatusAfterSet
+    }
+
+    func setEnabled(_ enabled: Bool) throws {
+        requestedValues.append(enabled)
+        if let nextStatusAfterSet {
+            status = nextStatusAfterSet
+        } else {
+            status = enabled ? .enabled : .disabled
+        }
+    }
+}
+
 final class SyncClipboardTests: XCTestCase {
     override func tearDown() {
         MockURLProtocol.requestHandler = nil
@@ -126,6 +202,17 @@ final class SyncClipboardTests: XCTestCase {
         XCTAssertEqual(
             AppModel.realtimePresentationState(for: .reconnecting),
             RealtimePresentationState(connectionStatusText: "Reconnecting", errorText: "")
+        )
+    }
+
+    func testConnectionStatusAfterSuccessfulPollingConnectionUsesPollingLabel() {
+        XCTAssertEqual(
+            AppModel.connectionStatusAfterSuccessfulConnectionTest(for: .polling),
+            "Polling"
+        )
+        XCTAssertEqual(
+            AppModel.connectionStatusAfterSuccessfulConnectionTest(for: .realtime),
+            "Connected"
         )
     }
 
@@ -431,6 +518,62 @@ final class SyncClipboardTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testRemoteDuplicatePayloadDoesNotRedownloadTransferFile() async throws {
+        let log = RequestLog()
+        let session = makeMockSession()
+        let httpClient = SyncClipboardHTTPClient(session: session)
+        let coordinator = SyncCoordinator(httpClient: httpClient, notifier: UserNotifier())
+        let clipboardService = FakeClipboardService()
+        let configuration = ServerConfiguration(
+            baseURL: URL(string: "https://example.com/sync/")!,
+            username: "alice",
+            password: "secret"
+        )
+        let profile = ProfileDTO(
+            type: .text,
+            hash: "hash-1",
+            text: "preview",
+            hasData: true,
+            dataName: "payload.txt",
+            size: 9
+        )
+
+        coordinator.updatePreferences(syncEnabled: true, showNotifications: false)
+        httpClient.updateConfiguration(configuration)
+
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+            log.append("\(request.httpMethod ?? "GET") \(url.absoluteString)")
+
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/sync/file/payload.txt"):
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data("full text".utf8)
+                )
+            default:
+                XCTFail("Unexpected request: \(request.httpMethod ?? "GET") \(url.absoluteString)")
+                return (
+                    HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!,
+                    Data()
+                )
+            }
+        }
+
+        let firstSyncResult = await coordinator.handleRemoteProfileChange(profile, using: clipboardService)
+        let secondSyncResult = await coordinator.handleRemoteProfileChange(profile, using: clipboardService)
+
+        XCTAssertTrue(firstSyncResult)
+        XCTAssertTrue(secondSyncResult)
+
+        XCTAssertEqual(
+            log.snapshot,
+            ["GET https://example.com/sync/file/payload.txt"]
+        )
+        XCTAssertEqual(clipboardService.writtenSnapshots.count, 1)
+    }
+
     func testCleanCloseWithoutAutoReconnectPublishesDisconnectedState() {
         XCTAssertEqual(
             SignalRRealtimeClient.terminalStateAfterClose(error: nil, autoReconnectEnabled: false),
@@ -481,6 +624,66 @@ final class SyncClipboardTests: XCTestCase {
                 "GET https://example.com/sync/api/time",
             ]
         )
+    }
+
+    @MainActor
+    func testPersistSettingsStoresPasswordBeforeSettingsFile() async {
+        let operations = RequestLog()
+        let settingsStore = FakeSettingsStore { settings in
+            operations.append("settings:\(settings.keychainAccount)")
+        }
+        let keychainStore = FakeKeychainStore { _, account in
+            operations.append("keychain:\(account)")
+        }
+        let launchManager = FakeLaunchAtLoginManager()
+        let model = AppModel(
+            settingsStore: settingsStore,
+            keychainStore: keychainStore,
+            httpClient: SyncClipboardHTTPClient(session: makeMockSession()),
+            clipboardService: FakeClipboardService(),
+            launchAtLoginManager: launchManager
+        )
+
+        model.serverURL = "https://example.com"
+        model.username = "alice"
+        model.password = "secret"
+
+        await model.persistSettings()
+
+        XCTAssertEqual(
+            operations.snapshot,
+            ["keychain:primary", "settings:primary"]
+        )
+        XCTAssertEqual(keychainStore.savedPasswords.first?.password, "secret")
+        XCTAssertEqual(settingsStore.savedSettings.first?.keychainAccount, "primary")
+    }
+
+    @MainActor
+    func testPersistSettingsShowsLaunchAtLoginPendingApprovalState() async {
+        let settingsStore = FakeSettingsStore()
+        let keychainStore = FakeKeychainStore()
+        let launchManager = FakeLaunchAtLoginManager(
+            status: .disabled,
+            nextStatusAfterSet: .requiresApproval
+        )
+        let model = AppModel(
+            settingsStore: settingsStore,
+            keychainStore: keychainStore,
+            httpClient: SyncClipboardHTTPClient(session: makeMockSession()),
+            clipboardService: FakeClipboardService(),
+            launchAtLoginManager: launchManager
+        )
+
+        model.launchAtLogin = true
+
+        await model.persistSettings()
+
+        XCTAssertFalse(model.launchAtLogin)
+        XCTAssertEqual(
+            model.lastErrorText,
+            AppModel.launchAtLoginIssueText(forRequestedState: true, status: .requiresApproval)
+        )
+        XCTAssertEqual(settingsStore.savedSettings.first?.launchAtLogin, false)
     }
 
     private func makeMockSession() -> URLSession {

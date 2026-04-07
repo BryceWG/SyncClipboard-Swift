@@ -1,7 +1,13 @@
 import Foundation
 import Security
 
-public final class KeychainStore {
+public protocol KeychainStoring {
+    func readPassword(account: String) throws -> String?
+    func savePassword(_ password: String, account: String) throws
+    func deletePassword(account: String) throws
+}
+
+public final class KeychainStore: KeychainStoring {
     private let service: String
 
     public init(service: String = "xyz.jericx.SyncClipboard-Swift") {

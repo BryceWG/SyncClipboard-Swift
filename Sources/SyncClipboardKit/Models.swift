@@ -181,6 +181,11 @@ public struct ProfileDTO: Codable, Equatable, Sendable {
         self.dataName = dataName
         self.size = size
     }
+
+    public var fingerprint: String {
+        let stableHash = hash.isEmpty ? text : hash
+        return "\(type.rawValue)|\(stableHash)"
+    }
 }
 
 public enum ClipboardPayload: Equatable, Sendable {

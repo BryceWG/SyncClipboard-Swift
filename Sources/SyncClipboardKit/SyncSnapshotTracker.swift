@@ -1,27 +1,36 @@
 import Foundation
 
 public struct SyncSnapshotTracker: Sendable {
-    private var lastLocal: ClipboardSnapshot?
-    private var lastRemote: ClipboardSnapshot?
-    private var lastAppliedRemote: ClipboardSnapshot?
+    private var lastLocalFingerprint: String?
+    private var lastAppliedRemoteFingerprint: String?
     private var suppressedFingerprint: String?
 
     public init() {}
 
     public mutating func shouldUpload(_ snapshot: ClipboardSnapshot) -> Bool {
-        defer { lastLocal = snapshot }
+        let fingerprint = snapshot.fingerprint
 
-        if suppressedFingerprint == snapshot.fingerprint {
+        defer { lastLocalFingerprint = fingerprint }
+
+        if suppressedFingerprint == fingerprint {
             suppressedFingerprint = nil
             return false
         }
-        if lastAppliedRemote == snapshot {
+        if lastAppliedRemoteFingerprint == fingerprint {
             return false
         }
-        if lastRemote == snapshot {
+        if lastLocalFingerprint == fingerprint {
             return false
         }
-        if lastLocal == snapshot {
+
+        return true
+    }
+
+    public mutating func shouldFetchRemote(fingerprint: String) -> Bool {
+        if lastAppliedRemoteFingerprint == fingerprint {
+            return false
+        }
+        if lastLocalFingerprint == fingerprint {
             return false
         }
 
@@ -29,17 +38,16 @@ public struct SyncSnapshotTracker: Sendable {
     }
 
     public mutating func markUploaded(_ snapshot: ClipboardSnapshot) {
-        lastLocal = snapshot
-        lastRemote = snapshot
+        lastLocalFingerprint = snapshot.fingerprint
     }
 
     public mutating func shouldApplyRemote(_ snapshot: ClipboardSnapshot) -> Bool {
-        lastRemote = snapshot
+        let fingerprint = snapshot.fingerprint
 
-        if lastAppliedRemote == snapshot {
+        if lastAppliedRemoteFingerprint == fingerprint {
             return false
         }
-        if lastLocal == snapshot {
+        if lastLocalFingerprint == fingerprint {
             return false
         }
 
@@ -47,9 +55,9 @@ public struct SyncSnapshotTracker: Sendable {
     }
 
     public mutating func markAppliedRemote(_ snapshot: ClipboardSnapshot) {
-        lastAppliedRemote = snapshot
-        lastLocal = snapshot
-        lastRemote = snapshot
-        suppressedFingerprint = snapshot.fingerprint
+        let fingerprint = snapshot.fingerprint
+        lastAppliedRemoteFingerprint = fingerprint
+        lastLocalFingerprint = fingerprint
+        suppressedFingerprint = fingerprint
     }
 }

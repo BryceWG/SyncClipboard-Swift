@@ -21,6 +21,7 @@ public final class SyncCoordinator {
     private var diagnostics = SyncDiagnostics()
     private var syncEnabled = false
     private var showNotifications = true
+    private var inFlightRemoteFingerprint: String?
     public var diagnosticsHandler: ((SyncDiagnostics) -> Void)?
 
     public init(httpClient: SyncClipboardHTTPClient, notifier: UserNotifier) {
@@ -31,12 +32,12 @@ public final class SyncCoordinator {
     public func updatePreferences(syncEnabled: Bool, showNotifications: Bool) {
         self.syncEnabled = syncEnabled
         self.showNotifications = showNotifications
-        if showNotifications {
+        if syncEnabled && showNotifications {
             notifier.prepareAuthorization()
         }
     }
 
-    public func handleLocalPasteboardChange(using clipboardService: ClipboardService) async {
+    public func handleLocalPasteboardChange(using clipboardService: any ClipboardServicing) async {
         guard syncEnabled else { return }
 
         do {
@@ -61,7 +62,7 @@ public final class SyncCoordinator {
     }
 
     @discardableResult
-    public func refreshFromServer(using clipboardService: ClipboardService) async -> Bool {
+    public func refreshFromServer(using clipboardService: any ClipboardServicing) async -> Bool {
         guard syncEnabled else { return false }
 
         do {
@@ -75,8 +76,15 @@ public final class SyncCoordinator {
     }
 
     @discardableResult
-    public func handleRemoteProfileChange(_ profile: ProfileDTO, using clipboardService: ClipboardService) async -> Bool {
+    public func handleRemoteProfileChange(_ profile: ProfileDTO, using clipboardService: any ClipboardServicing) async -> Bool {
         guard syncEnabled else { return false }
+        let fingerprint = profile.fingerprint
+
+        guard beginRemoteHandlingIfNeeded(fingerprint: fingerprint) else {
+            return true
+        }
+
+        defer { finishRemoteHandling(fingerprint: fingerprint) }
 
         do {
             let transferData: Data?
@@ -105,5 +113,25 @@ public final class SyncCoordinator {
             diagnosticsHandler?(diagnostics)
             return false
         }
+    }
+
+    private func beginRemoteHandlingIfNeeded(fingerprint: String) -> Bool {
+        guard inFlightRemoteFingerprint != fingerprint else {
+            return false
+        }
+        guard tracker.shouldFetchRemote(fingerprint: fingerprint) else {
+            return false
+        }
+
+        inFlightRemoteFingerprint = fingerprint
+        return true
+    }
+
+    private func finishRemoteHandling(fingerprint: String) {
+        guard inFlightRemoteFingerprint == fingerprint else {
+            return
+        }
+
+        inFlightRemoteFingerprint = nil
     }
 }

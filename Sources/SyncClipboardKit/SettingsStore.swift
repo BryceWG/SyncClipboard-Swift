@@ -1,6 +1,11 @@
 import Foundation
 
-public final class SettingsStore {
+public protocol SettingsStoring {
+    func load() throws -> AppSettings
+    func save(_ settings: AppSettings) throws
+}
+
+public final class SettingsStore: SettingsStoring {
     public let fileURL: URL
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()

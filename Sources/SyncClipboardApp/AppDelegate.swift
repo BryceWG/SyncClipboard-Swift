@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusMenuController: StatusMenuController?
     private var settingsWindowController: SettingsWindowController?
     private var cancellables = Set<AnyCancellable>()
+    private var terminationInProgress = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyDockIconVisibility(appModel.showDockIcon)
@@ -36,8 +37,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        appModel.stop()
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminationInProgress else {
+            return .terminateNow
+        }
+
+        terminationInProgress = true
+        Task { @MainActor in
+            await appModel.stop()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

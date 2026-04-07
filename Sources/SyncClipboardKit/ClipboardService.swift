@@ -2,7 +2,13 @@ import AppKit
 import Foundation
 
 @MainActor
-public final class ClipboardService {
+public protocol ClipboardServicing: AnyObject {
+    func readCurrentSnapshot() throws -> ClipboardSnapshot?
+    func write(_ snapshot: ClipboardSnapshot) throws
+}
+
+@MainActor
+public final class ClipboardService: ClipboardServicing {
     public init() {}
 
     public func readCurrentSnapshot() throws -> ClipboardSnapshot? {

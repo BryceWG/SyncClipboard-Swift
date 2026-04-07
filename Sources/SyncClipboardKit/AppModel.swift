@@ -25,24 +25,27 @@ public final class AppModel: ObservableObject {
 
     public let clipboardMonitor: ClipboardMonitor
 
-    private let settingsStore: SettingsStore
-    private let keychainStore: KeychainStore
+    private let settingsStore: any SettingsStoring
+    private let keychainStore: any KeychainStoring
     private let httpClient: SyncClipboardHTTPClient
-    private let clipboardService: ClipboardService
+    private let clipboardService: any ClipboardServicing
     private let realtimeClient: any RealtimeClient
     private let coordinator: SyncCoordinator
-    private let launchAtLoginManager = LaunchAtLoginManager()
+    private let launchAtLoginManager: any LaunchAtLoginManaging
     private var pollingTask: Task<Void, Never>?
 
     public init(
-        settingsStore: SettingsStore = SettingsStore(),
-        keychainStore: KeychainStore = KeychainStore(),
-        httpClient: SyncClipboardHTTPClient = SyncClipboardHTTPClient()
+        settingsStore: any SettingsStoring = SettingsStore(),
+        keychainStore: any KeychainStoring = KeychainStore(),
+        httpClient: SyncClipboardHTTPClient = SyncClipboardHTTPClient(),
+        clipboardService: any ClipboardServicing = ClipboardService(),
+        launchAtLoginManager: any LaunchAtLoginManaging = LaunchAtLoginManager()
     ) {
         self.settingsStore = settingsStore
         self.keychainStore = keychainStore
         self.httpClient = httpClient
-        self.clipboardService = ClipboardService()
+        self.clipboardService = clipboardService
+        self.launchAtLoginManager = launchAtLoginManager
         self.clipboardMonitor = ClipboardMonitor()
 
         let loadedSettings = (try? settingsStore.load()) ?? AppSettings()
@@ -52,7 +55,7 @@ public final class AppModel: ObservableObject {
         self.username = loadedSettings.username
         self.password = loadedPassword ?? ""
         self.syncEnabled = loadedSettings.syncEnabled
-        self.launchAtLogin = launchAtLoginManager.isEnabled
+        self.launchAtLogin = Self.launchAtLoginEnabled(for: launchAtLoginManager.status)
         self.showNotifications = loadedSettings.showNotifications
         self.showDockIcon = loadedSettings.showDockIcon
         self.receiveMode = loadedSettings.receiveMode
@@ -69,7 +72,7 @@ public final class AppModel: ObservableObject {
 
         self.realtimeClient.onProfileChanged = { [weak self] profile in
             guard let self else { return }
-            Task {
+            Task { @MainActor in
                 await self.coordinator.handleRemoteProfileChange(profile, using: self.clipboardService)
             }
         }
@@ -90,22 +93,30 @@ public final class AppModel: ObservableObject {
         Task { await applyRuntimeConfiguration(forceRefresh: true) }
     }
 
-    public func stop() {
+    public func stop() async {
         clipboardMonitor.stop()
+        clipboardMonitor.onChange = nil
         stopPollingLoop()
-        Task { await realtimeClient.stop() }
+        realtimeClient.onProfileChanged = nil
+        realtimeClient.onStateChange = nil
+        coordinator.diagnosticsHandler = nil
+        await realtimeClient.stop()
     }
 
     public func persistSettings() async {
         let requestedLaunchAtLogin = launchAtLogin
+        var issueText: String?
 
         do {
             try launchAtLoginManager.setEnabled(requestedLaunchAtLogin)
-            launchAtLogin = launchAtLoginManager.isEnabled
-            lastErrorText = ""
         } catch {
-            launchAtLogin = launchAtLoginManager.isEnabled
-            lastErrorText = error.localizedDescription
+            issueText = error.localizedDescription
+        }
+
+        let launchStatus = launchAtLoginManager.status
+        launchAtLogin = Self.launchAtLoginEnabled(for: launchStatus)
+        if issueText == nil {
+            issueText = Self.launchAtLoginIssueText(forRequestedState: requestedLaunchAtLogin, status: launchStatus)
         }
 
         let settings = AppSettings(
@@ -122,20 +133,25 @@ public final class AppModel: ObservableObject {
         )
 
         do {
-            try settingsStore.save(settings)
             try keychainStore.savePassword(password, account: settings.keychainAccount)
+            try settingsStore.save(settings)
         } catch {
-            lastErrorText = error.localizedDescription
+            issueText = error.localizedDescription
         }
 
+        lastErrorText = issueText ?? ""
         await applyRuntimeConfiguration(forceRefresh: false)
     }
 
     public func testConnection() async {
+        let configuration = buildServerConfiguration()
+
         do {
-            httpClient.updateConfiguration(buildServerConfiguration())
+            httpClient.updateConfiguration(configuration)
             try await httpClient.testConnection()
-            connectionStatusText = "Connected"
+            connectionStatusText = Self.connectionStatusAfterSuccessfulConnectionTest(
+                for: configuration?.receiveMode ?? receiveMode
+            )
             lastErrorText = ""
         } catch {
             connectionStatusText = "Error"
@@ -226,7 +242,7 @@ public final class AppModel: ObservableObject {
     }
 
     private func handleLocalClipboardChange() {
-        Task {
+        Task { @MainActor in
             await coordinator.handleLocalPasteboardChange(using: clipboardService)
         }
     }
@@ -306,6 +322,32 @@ public final class AppModel: ObservableObject {
             return RealtimePresentationState(connectionStatusText: "Reconnecting", errorText: "")
         case .error(let message):
             return RealtimePresentationState(connectionStatusText: "Error", errorText: message)
+        }
+    }
+
+    nonisolated static func launchAtLoginEnabled(for status: LaunchAtLoginStatus) -> Bool {
+        status == .enabled
+    }
+
+    nonisolated static func launchAtLoginIssueText(
+        forRequestedState requested: Bool,
+        status: LaunchAtLoginStatus
+    ) -> String? {
+        guard requested, status == .requiresApproval else {
+            return nil
+        }
+
+        return "Launch at Login is pending approval in System Settings."
+    }
+
+    nonisolated static func connectionStatusAfterSuccessfulConnectionTest(
+        for receiveMode: RemoteReceiveMode
+    ) -> String {
+        switch receiveMode {
+        case .realtime:
+            return "Connected"
+        case .polling:
+            return "Polling"
         }
     }
 }
