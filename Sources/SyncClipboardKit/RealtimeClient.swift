@@ -130,7 +130,7 @@ public final class SignalRRealtimeClient: RealtimeClient {
             return
         }
 
-        await fetchAndEmitCurrentProfile(using: context)
+        await fetchAndEmitCurrentProfile(using: context, forceEmit: true)
     }
 
     private func replaceConnection(with configuration: ServerConfiguration, resetFingerprint: Bool) async {
@@ -175,7 +175,8 @@ public final class SignalRRealtimeClient: RealtimeClient {
 
             onStateChange?(.connected)
             await fetchAndEmitCurrentProfile(
-                using: RealtimeRefreshContext(configuration: configuration, connectionToken: token)
+                using: RealtimeRefreshContext(configuration: configuration, connectionToken: token),
+                forceEmit: false
             )
         } catch {
             guard isCurrentConnection(token: token, configuration: configuration) else {
@@ -270,7 +271,8 @@ public final class SignalRRealtimeClient: RealtimeClient {
 
         onStateChange?(.connected)
         await fetchAndEmitCurrentProfile(
-            using: RealtimeRefreshContext(configuration: configuration, connectionToken: token)
+            using: RealtimeRefreshContext(configuration: configuration, connectionToken: token),
+            forceEmit: false
         )
     }
 
@@ -314,7 +316,7 @@ public final class SignalRRealtimeClient: RealtimeClient {
         }
     }
 
-    private func fetchAndEmitCurrentProfile(using context: RealtimeRefreshContext) async {
+    private func fetchAndEmitCurrentProfile(using context: RealtimeRefreshContext, forceEmit: Bool) async {
         httpClient.updateConfiguration(context.configuration)
 
         do {
@@ -323,7 +325,7 @@ public final class SignalRRealtimeClient: RealtimeClient {
                 return
             }
 
-            emitIfNeeded(profile)
+            emitIfNeeded(profile, forceEmit: forceEmit)
         } catch {
             guard isCurrentRefreshContext(context) else {
                 return
@@ -333,9 +335,9 @@ public final class SignalRRealtimeClient: RealtimeClient {
         }
     }
 
-    private func emitIfNeeded(_ profile: ProfileDTO) {
+    private func emitIfNeeded(_ profile: ProfileDTO, forceEmit: Bool = false) {
         let fingerprint = SignalRConnectionMetadata.fingerprint(for: profile)
-        guard fingerprint != lastFingerprint else {
+        guard forceEmit || fingerprint != lastFingerprint else {
             return
         }
 

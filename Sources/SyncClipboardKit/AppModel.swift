@@ -117,7 +117,7 @@ public final class AppModel: ObservableObject {
 
     public func syncNow() async {
         httpClient.updateConfiguration(buildServerConfiguration())
-        await coordinator.refreshFromServer(using: clipboardService)
+        await coordinator.handleLocalPasteboardChange(using: clipboardService)
         await realtimeClient.pollNow()
     }
 
