@@ -31,6 +31,9 @@ public final class SyncCoordinator {
     public func updatePreferences(syncEnabled: Bool, showNotifications: Bool) {
         self.syncEnabled = syncEnabled
         self.showNotifications = showNotifications
+        if showNotifications {
+            notifier.prepareAuthorization()
+        }
     }
 
     public func handleLocalPasteboardChange(using clipboardService: ClipboardService) async {

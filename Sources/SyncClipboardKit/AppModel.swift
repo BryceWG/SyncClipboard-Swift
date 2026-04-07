@@ -42,7 +42,7 @@ public final class AppModel: ObservableObject {
         self.username = loadedSettings.username
         self.password = loadedPassword ?? ""
         self.syncEnabled = loadedSettings.syncEnabled
-        self.launchAtLogin = loadedSettings.launchAtLogin
+        self.launchAtLogin = launchAtLoginManager.isEnabled
         self.showNotifications = loadedSettings.showNotifications
 
         let notifier = UserNotifier()
@@ -82,6 +82,17 @@ public final class AppModel: ObservableObject {
     }
 
     public func persistSettings() async {
+        let requestedLaunchAtLogin = launchAtLogin
+
+        do {
+            try launchAtLoginManager.setEnabled(requestedLaunchAtLogin)
+            launchAtLogin = launchAtLoginManager.isEnabled
+            lastErrorText = ""
+        } catch {
+            launchAtLogin = launchAtLoginManager.isEnabled
+            lastErrorText = error.localizedDescription
+        }
+
         let settings = AppSettings(
             serverURL: serverURL.trimmingCharacters(in: .whitespacesAndNewlines),
             username: username.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -94,8 +105,6 @@ public final class AppModel: ObservableObject {
         do {
             try settingsStore.save(settings)
             try keychainStore.savePassword(password, account: settings.keychainAccount)
-            try launchAtLoginManager.setEnabled(launchAtLogin)
-            lastErrorText = ""
         } catch {
             lastErrorText = error.localizedDescription
         }

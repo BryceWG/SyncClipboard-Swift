@@ -1,7 +1,7 @@
 /.build
 /.swiftpm
 /DerivedData
-/xcuserdata
+xcuserdata/
 .DS_Store
 /Package.resolved
 /README.html

@@ -47,6 +47,10 @@ Deliberately excluded unless the user asks for them:
   unit tests
 - `build/macos/`
   packaging script, plist template, app icon
+- `project.yml`
+  XcodeGen source of truth for the native Xcode project
+- `SyncClipboard-Swift.xcodeproj/`
+  generated native Xcode project for macOS app development
 - `legacy/dotnet-v3/`
   archived old codebase for reference only
 
@@ -60,6 +64,7 @@ Local development:
 swift build
 swift test
 swift run SyncClipboard-Swift
+open SyncClipboard-Swift.xcodeproj
 ```
 
 Package a local `.app` bundle:
@@ -75,8 +80,9 @@ Packaged outputs:
 
 Important:
 
-- packaging is currently driven by SwiftPM plus `build/macos/package_app.sh`
-- this repo does not yet have a dedicated native `.xcodeproj` app target producing `.app` directly from archive
+- `project.yml` is the editable source of truth for the Xcode project
+- regenerate the project with `xcodegen generate` after changing project structure
+- packaging is driven by the native Xcode app target via `build/macos/package_app.sh`
 
 ## Runtime Architecture
 
@@ -132,7 +138,6 @@ When changing protocol handling, keep compatibility with the official server unl
 
 These are known non-blocking gaps at the current stage:
 
-- no native Xcode app target yet
 - no release signing / notarization workflow
 - no end-to-end automated test against a live SyncClipboard server
 - UI still contains a couple of convenience toggles that are not strictly part of the minimum requested scope
