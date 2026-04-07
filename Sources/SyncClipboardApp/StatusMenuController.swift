@@ -20,15 +20,8 @@ final class StatusMenuController {
         self.openSettings = openSettings
 
         if let button = statusItem.button {
-            if let image = NSImage(
-                systemSymbolName: "arrow.left.arrow.right.circle.fill",
-                accessibilityDescription: "SyncClipboard-Swift"
-            ) {
-                image.isTemplate = true
-                button.image = image
-            } else {
-                button.title = "SC"
-            }
+            button.imagePosition = .imageOnly
+            button.imageScaling = .scaleProportionallyDown
             button.toolTip = "SyncClipboard-Swift"
         }
 
@@ -79,6 +72,63 @@ final class StatusMenuController {
     private func refreshMenu() {
         statusLineItem.title = "Status: \(appModel.connectionStatusText)"
         syncToggleItem.state = appModel.syncEnabled ? .on : .off
-        syncNowItem.isEnabled = appModel.syncEnabled
+        syncNowItem.isEnabled = appModel.syncEnabled && !appModel.requiresSetup
+        updateStatusIcon()
+    }
+
+    private func updateStatusIcon() {
+        guard let button = statusItem.button else { return }
+
+        let resourceName: String
+        let isTemplate: Bool
+
+        let hasError = appModel.connectionStatusText == "Error"
+            || appModel.connectionStatusText == "Missing Config"
+            || !appModel.lastErrorText.isEmpty
+
+        if !appModel.syncEnabled {
+            resourceName = hasError ? "error-inactive" : "default-inactive"
+            isTemplate = false
+        } else if hasError {
+            resourceName = "error"
+            isTemplate = true
+        } else {
+            resourceName = "default"
+            isTemplate = true
+        }
+
+        if let image = Self.loadTrayImage(named: resourceName) {
+            let sizedImage = Self.makeStatusBarImage(from: image, targetHeight: button.bounds.height)
+            sizedImage.isTemplate = isTemplate
+            button.image = sizedImage
+            button.title = ""
+        } else {
+            button.image = nil
+            button.title = "SC"
+        }
+    }
+
+    private static func loadTrayImage(named name: String) -> NSImage? {
+        let bundle = Bundle.main
+        let candidates: [(String?, String)] = [
+            ("tray", name),
+            (nil, name),
+        ]
+
+        for (directory, resourceName) in candidates {
+            if let url = bundle.url(forResource: resourceName, withExtension: "png", subdirectory: directory),
+               let image = NSImage(contentsOf: url) {
+                return image
+            }
+        }
+
+        return nil
+    }
+
+    private static func makeStatusBarImage(from image: NSImage, targetHeight: CGFloat) -> NSImage {
+        let resized = (image.copy() as? NSImage) ?? image
+        let side = min(max(targetHeight - 6, 14), 18)
+        resized.size = NSSize(width: side, height: side)
+        return resized
     }
 }

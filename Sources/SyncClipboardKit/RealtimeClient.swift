@@ -54,6 +54,7 @@ enum SignalRConnectionMetadata {
         let stableHash = profile.hash.isEmpty ? profile.text : profile.hash
         return "\(profile.type.rawValue)|\(stableHash)"
     }
+
 }
 
 struct InfiniteSignalRRetryPolicy: RetryPolicy {
@@ -193,14 +194,19 @@ public final class SignalRRealtimeClient: RealtimeClient {
     private func buildConnection(for configuration: ServerConfiguration) -> HubConnection {
         var options = HttpConnectionOptions()
         options.headers = SignalRConnectionMetadata.headers(for: configuration)
-
-        return HubConnectionBuilder()
+        let builder = HubConnectionBuilder()
             .withUrl(url: SignalRConnectionMetadata.hubURL(for: configuration.baseURL), options: options)
             .withHubProtocol(hubProtocol: .json)
             .withServerTimeout(serverTimeout: 30)
             .withKeepAliveInterval(keepAliveInterval: 15)
-            .withAutomaticReconnect(retryPolicy: InfiniteSignalRRetryPolicy())
-            .build()
+
+        if configuration.autoReconnect {
+            return builder
+                .withAutomaticReconnect(retryPolicy: InfiniteSignalRRetryPolicy())
+                .build()
+        }
+
+        return builder.build()
     }
 
     private func installHandlers(on connection: HubConnection, configuration: ServerConfiguration, token: UUID) async {
@@ -288,15 +294,19 @@ public final class SignalRRealtimeClient: RealtimeClient {
             return
         }
 
+        if let terminalState = Self.terminalStateAfterClose(error: error, autoReconnectEnabled: configuration.autoReconnect) {
+            onStateChange?(terminalState)
+            return
+        }
+
         if let error {
             onStateChange?(.error(error.localizedDescription))
         }
-
         scheduleRestart(for: configuration)
     }
 
     private func scheduleRestart(for configuration: ServerConfiguration) {
-        guard desiredConfiguration == configuration else {
+        guard desiredConfiguration == configuration, configuration.autoReconnect else {
             return
         }
 
@@ -379,5 +389,17 @@ public final class SignalRRealtimeClient: RealtimeClient {
         }
 
         return currentConnectionToken == contextToken
+    }
+
+    nonisolated static func terminalStateAfterClose(error: Error?, autoReconnectEnabled: Bool) -> RealtimeState? {
+        guard !autoReconnectEnabled else {
+            return nil
+        }
+
+        if let error {
+            return .error(error.localizedDescription)
+        }
+
+        return .disconnected
     }
 }

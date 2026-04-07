@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SyncClipboardKit
 
 @MainActor
@@ -6,9 +7,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let appModel = AppModel()
     private var statusMenuController: StatusMenuController?
     private var settingsWindowController: SettingsWindowController?
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApplication.shared.setActivationPolicy(.accessory)
+        applyDockIconVisibility(appModel.showDockIcon)
+        observeWorkspaceNotifications()
 
         let settingsWindowController = SettingsWindowController(appModel: appModel)
         let statusMenuController = StatusMenuController(
@@ -20,6 +23,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         self.settingsWindowController = settingsWindowController
         self.statusMenuController = statusMenuController
+        appModel.$showDockIcon
+            .removeDuplicates()
+            .sink { [weak self] showDockIcon in
+                self?.applyDockIconVisibility(showDockIcon)
+            }
+            .store(in: &cancellables)
         appModel.start()
 
         if appModel.requiresSetup {
@@ -34,5 +43,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         settingsWindowController?.show()
         return true
+    }
+
+    private func applyDockIconVisibility(_ showDockIcon: Bool) {
+        let activationPolicy: NSApplication.ActivationPolicy = showDockIcon ? .regular : .accessory
+        NSApplication.shared.setActivationPolicy(activationPolicy)
+    }
+
+    private func observeWorkspaceNotifications() {
+        NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.didWakeNotification)
+            .sink { [weak self] _ in
+                self?.appModel.handleSystemWake()
+            }
+            .store(in: &cancellables)
     }
 }

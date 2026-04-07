@@ -9,6 +9,10 @@ public final class AppModel: ObservableObject {
     @Published public var syncEnabled: Bool
     @Published public var launchAtLogin: Bool
     @Published public var showNotifications: Bool
+    @Published public var showDockIcon: Bool
+    @Published public var receiveMode: RemoteReceiveMode
+    @Published public var pollingIntervalSeconds: Double
+    @Published public var autoReconnect: Bool
     @Published public private(set) var connectionStatusText = "Disconnected"
     @Published public private(set) var lastPushText = "Never"
     @Published public private(set) var lastPullText = "Never"
@@ -23,6 +27,7 @@ public final class AppModel: ObservableObject {
     private let realtimeClient: any RealtimeClient
     private let coordinator: SyncCoordinator
     private let launchAtLoginManager = LaunchAtLoginManager()
+    private var pollingTask: Task<Void, Never>?
 
     public init(
         settingsStore: SettingsStore = SettingsStore(),
@@ -44,6 +49,10 @@ public final class AppModel: ObservableObject {
         self.syncEnabled = loadedSettings.syncEnabled
         self.launchAtLogin = launchAtLoginManager.isEnabled
         self.showNotifications = loadedSettings.showNotifications
+        self.showDockIcon = loadedSettings.showDockIcon
+        self.receiveMode = loadedSettings.receiveMode
+        self.pollingIntervalSeconds = loadedSettings.pollingIntervalSeconds
+        self.autoReconnect = loadedSettings.autoReconnect
 
         let notifier = UserNotifier()
         self.realtimeClient = RealtimeClientFactory.make(httpClient: httpClient)
@@ -78,6 +87,7 @@ public final class AppModel: ObservableObject {
 
     public func stop() {
         clipboardMonitor.stop()
+        stopPollingLoop()
         Task { await realtimeClient.stop() }
     }
 
@@ -99,7 +109,11 @@ public final class AppModel: ObservableObject {
             keychainAccount: "primary",
             syncEnabled: syncEnabled,
             launchAtLogin: launchAtLogin,
-            showNotifications: showNotifications
+            showNotifications: showNotifications,
+            showDockIcon: showDockIcon,
+            receiveMode: receiveMode,
+            pollingIntervalSeconds: pollingIntervalSeconds,
+            autoReconnect: autoReconnect
         )
 
         do {
@@ -127,11 +141,37 @@ public final class AppModel: ObservableObject {
     public func syncNow() async {
         httpClient.updateConfiguration(buildServerConfiguration())
         await coordinator.handleLocalPasteboardChange(using: clipboardService)
-        await realtimeClient.pollNow()
+        switch receiveMode {
+        case .realtime:
+            await realtimeClient.pollNow()
+        case .polling:
+            await coordinator.refreshFromServer(using: clipboardService)
+        }
     }
 
     public var requiresSetup: Bool {
         buildServerConfiguration() == nil
+    }
+
+    public func handleSystemWake() {
+        Task {
+            let configuration = buildServerConfiguration()
+            httpClient.updateConfiguration(configuration)
+
+            guard let configuration, syncEnabled, autoReconnect else {
+                return
+            }
+
+            switch receiveMode {
+            case .realtime:
+                await realtimeClient.stop()
+                await realtimeClient.start(configuration: configuration)
+                _ = await coordinator.refreshFromServer(using: clipboardService)
+            case .polling:
+                connectionStatusText = "Polling"
+                _ = await coordinator.refreshFromServer(using: clipboardService)
+            }
+        }
     }
 
     private func applyRuntimeConfiguration(forceRefresh: Bool) async {
@@ -140,14 +180,23 @@ public final class AppModel: ObservableObject {
         coordinator.updatePreferences(syncEnabled: syncEnabled, showNotifications: showNotifications)
 
         guard let configuration, syncEnabled else {
+            stopPollingLoop()
             connectionStatusText = syncEnabled ? "Missing Config" : "Disabled"
             await realtimeClient.stop()
             return
         }
 
-        await realtimeClient.start(configuration: configuration)
-        if forceRefresh {
-            await coordinator.refreshFromServer(using: clipboardService)
+        switch receiveMode {
+        case .realtime:
+            stopPollingLoop()
+            await realtimeClient.start(configuration: configuration)
+            if forceRefresh {
+                _ = await coordinator.refreshFromServer(using: clipboardService)
+            }
+        case .polling:
+            await realtimeClient.stop()
+            connectionStatusText = "Polling"
+            startPollingLoop(forceRefresh: forceRefresh)
         }
     }
 
@@ -162,7 +211,13 @@ public final class AppModel: ObservableObject {
             return nil
         }
 
-        return ServerConfiguration(baseURL: url, username: trimmedUser, password: password)
+        return ServerConfiguration(
+            baseURL: url,
+            username: trimmedUser,
+            password: password,
+            receiveMode: receiveMode,
+            autoReconnect: autoReconnect
+        )
     }
 
     private func handleLocalClipboardChange() {
@@ -194,9 +249,48 @@ public final class AppModel: ObservableObject {
         if let lastPullAt = diagnostics.lastPullAt {
             lastPullText = Self.relativeFormatter.localizedString(for: lastPullAt, relativeTo: Date())
         }
-        if let lastError = diagnostics.lastError {
-            lastErrorText = lastError
+        lastErrorText = diagnostics.lastError ?? ""
+
+        guard syncEnabled, !requiresSetup, receiveMode == .polling else {
+            return
         }
+
+        connectionStatusText = lastErrorText.isEmpty ? "Polling" : "Error"
+    }
+
+    private func startPollingLoop(forceRefresh: Bool) {
+        stopPollingLoop()
+
+        pollingTask = Task { [weak self] in
+            guard let self else { return }
+
+            if forceRefresh {
+                let succeeded = await self.coordinator.refreshFromServer(using: self.clipboardService)
+                if !succeeded && !self.autoReconnect {
+                    self.connectionStatusText = "Error"
+                    self.pollingTask = nil
+                    return
+                }
+            }
+
+            while !Task.isCancelled {
+                let interval = max(self.pollingIntervalSeconds, 0.5)
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled else { break }
+                let succeeded = await self.coordinator.refreshFromServer(using: self.clipboardService)
+                if !succeeded && !self.autoReconnect {
+                    self.connectionStatusText = "Error"
+                    break
+                }
+            }
+
+            self.pollingTask = nil
+        }
+    }
+
+    private func stopPollingLoop() {
+        pollingTask?.cancel()
+        pollingTask = nil
     }
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {

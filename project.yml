@@ -44,6 +44,8 @@ targets:
       - path: Sources/SyncClipboardApp
       - path: build/macos/icon.icns
         buildPhase: resources
+      - path: build/macos/tray
+        buildPhase: resources
     dependencies:
       - target: SyncClipboardKit
     settings:

@@ -4,10 +4,7 @@ import UserNotifications
 public final class UserNotifier: NSObject, UNUserNotificationCenterDelegate {
     private var authorizationRequested = false
 
-    public override init() {
-        super.init()
-        UNUserNotificationCenter.current().delegate = self
-    }
+    public override init() {}
 
     public func prepareAuthorization() {
         let center = UNUserNotificationCenter.current()

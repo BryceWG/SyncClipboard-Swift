@@ -145,6 +145,69 @@ final class SyncClipboardTests: XCTestCase {
         )
     }
 
+    func testAppSettingsDecodeBackfillsNewFields() throws {
+        let legacyJSON = """
+        {
+          "serverURL": "https://example.com",
+          "username": "alice",
+          "keychainAccount": "primary",
+          "syncEnabled": true,
+          "launchAtLogin": false,
+          "showNotifications": true
+        }
+        """.data(using: .utf8)!
+
+        let settings = try JSONDecoder().decode(AppSettings.self, from: legacyJSON)
+
+        XCTAssertEqual(settings.serverURL, "https://example.com")
+        XCTAssertEqual(settings.username, "alice")
+        XCTAssertEqual(settings.keychainAccount, "primary")
+        XCTAssertTrue(settings.syncEnabled)
+        XCTAssertTrue(settings.showNotifications)
+        XCTAssertTrue(settings.showDockIcon)
+        XCTAssertEqual(settings.receiveMode, .realtime)
+        XCTAssertEqual(settings.pollingIntervalSeconds, 1.0)
+        XCTAssertTrue(settings.autoReconnect)
+    }
+
+    func testAppSettingsDecodePreservesLegacyRealtimeTransportChoices() throws {
+        let legacyLongPollingJSON = """
+        {
+          "realtimeTransportMode": "longPolling"
+        }
+        """.data(using: .utf8)!
+        let legacyRealtimeJSON = """
+        {
+          "realtimeTransportMode": "serverSentEvents"
+        }
+        """.data(using: .utf8)!
+
+        let longPollingSettings = try JSONDecoder().decode(AppSettings.self, from: legacyLongPollingJSON)
+        let realtimeSettings = try JSONDecoder().decode(AppSettings.self, from: legacyRealtimeJSON)
+
+        XCTAssertEqual(longPollingSettings.receiveMode, .realtime)
+        XCTAssertEqual(realtimeSettings.receiveMode, .realtime)
+    }
+
+    func testAppSettingsClampPollingInterval() throws {
+        let tooSmallJSON = """
+        {
+          "pollingIntervalSeconds": 0.1
+        }
+        """.data(using: .utf8)!
+        let tooLargeJSON = """
+        {
+          "pollingIntervalSeconds": 120
+        }
+        """.data(using: .utf8)!
+
+        let tooSmallSettings = try JSONDecoder().decode(AppSettings.self, from: tooSmallJSON)
+        let tooLargeSettings = try JSONDecoder().decode(AppSettings.self, from: tooLargeJSON)
+
+        XCTAssertEqual(tooSmallSettings.pollingIntervalSeconds, 0.5)
+        XCTAssertEqual(tooLargeSettings.pollingIntervalSeconds, 60.0)
+    }
+
     @MainActor
     func testRefreshContextRejectsSupersededConnectionsEvenWhenConfigurationMatches() {
         let configuration = ServerConfiguration(
@@ -265,6 +328,117 @@ final class SyncClipboardTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    @MainActor
+    func testRefreshFromServerReturnsFalseWhenRemoteDownloadFails() async {
+        let session = makeMockSession()
+        let httpClient = SyncClipboardHTTPClient(session: session)
+        let coordinator = SyncCoordinator(httpClient: httpClient, notifier: UserNotifier())
+        let clipboardService = ClipboardService()
+        let configuration = ServerConfiguration(
+            baseURL: URL(string: "https://example.com/sync/")!,
+            username: "alice",
+            password: "secret"
+        )
+        let profile = ProfileDTO(
+            type: .text,
+            hash: "hash",
+            text: "preview",
+            hasData: true,
+            dataName: "missing.txt",
+            size: 7
+        )
+        var latestDiagnostics = SyncDiagnostics()
+
+        coordinator.updatePreferences(syncEnabled: true, showNotifications: false)
+        coordinator.diagnosticsHandler = { diagnostics in
+            latestDiagnostics = diagnostics
+        }
+        httpClient.updateConfiguration(configuration)
+
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+
+            switch (request.httpMethod, url.path) {
+            case ("GET", "/sync/SyncClipboard.json"):
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    try JSONEncoder().encode(profile)
+                )
+            case ("GET", "/sync/file/missing.txt"):
+                return (
+                    HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!,
+                    Data()
+                )
+            default:
+                XCTFail("Unexpected request: \(request.httpMethod ?? "GET") \(url.absoluteString)")
+                return (
+                    HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!,
+                    Data()
+                )
+            }
+        }
+
+        let succeeded = await coordinator.refreshFromServer(using: clipboardService)
+
+        XCTAssertFalse(succeeded)
+        XCTAssertEqual(
+            latestDiagnostics.lastError,
+            SyncClipboardError.unexpectedResponse(404).localizedDescription
+        )
+    }
+
+    func testCleanCloseWithoutAutoReconnectPublishesDisconnectedState() {
+        XCTAssertEqual(
+            SignalRRealtimeClient.terminalStateAfterClose(error: nil, autoReconnectEnabled: false),
+            .disconnected
+        )
+        XCTAssertNil(
+            SignalRRealtimeClient.terminalStateAfterClose(error: nil, autoReconnectEnabled: true)
+        )
+    }
+
+    @MainActor
+    func testPollingConnectionDoesNotRequireSignalRHub() async throws {
+        let log = RequestLog()
+        let session = makeMockSession()
+        let client = SyncClipboardHTTPClient(session: session)
+        let configuration = ServerConfiguration(
+            baseURL: URL(string: "https://example.com/sync/")!,
+            username: "alice",
+            password: "secret",
+            receiveMode: .polling
+        )
+        client.updateConfiguration(configuration)
+
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+            log.append("\(request.httpMethod ?? "GET") \(url.absoluteString)")
+
+            switch (request.httpMethod, url.path, url.query) {
+            case ("GET", "/sync/api/time", nil):
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data("ok".utf8)
+                )
+            default:
+                XCTFail("Unexpected request: \(request.httpMethod ?? "GET") \(url.absoluteString)")
+                return (
+                    HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!,
+                    Data()
+                )
+            }
+        }
+
+        try await client.testConnection()
+
+        XCTAssertEqual(
+            log.snapshot,
+            [
+                "GET https://example.com/sync/api/time",
+            ]
+        )
     }
 
     private func makeMockSession() -> URLSession {

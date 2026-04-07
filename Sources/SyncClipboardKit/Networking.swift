@@ -40,12 +40,14 @@ public final class SyncClipboardHTTPClient {
         )
         _ = try await perform(timeRequest)
 
-        let hubRequest = Self.makeRequest(
-            url: SignalRConnectionMetadata.hubNegotiateURL(for: configuration.baseURL),
-            method: "POST",
-            auth: auth
-        )
-        _ = try await perform(hubRequest)
+        if configuration.receiveMode == .realtime {
+            let hubRequest = Self.makeRequest(
+                url: SignalRConnectionMetadata.hubNegotiateURL(for: configuration.baseURL),
+                method: "POST",
+                auth: auth
+            )
+            _ = try await perform(hubRequest)
+        }
     }
 
     public func fetchCurrentProfile() async throws -> ProfileDTO {

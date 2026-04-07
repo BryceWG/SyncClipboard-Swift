@@ -60,20 +60,23 @@ public final class SyncCoordinator {
         }
     }
 
-    public func refreshFromServer(using clipboardService: ClipboardService) async {
-        guard syncEnabled else { return }
+    @discardableResult
+    public func refreshFromServer(using clipboardService: ClipboardService) async -> Bool {
+        guard syncEnabled else { return false }
 
         do {
             let profile = try await httpClient.fetchCurrentProfile()
-            await handleRemoteProfileChange(profile, using: clipboardService)
+            return await handleRemoteProfileChange(profile, using: clipboardService)
         } catch {
             diagnostics.lastError = error.localizedDescription
             diagnosticsHandler?(diagnostics)
+            return false
         }
     }
 
-    public func handleRemoteProfileChange(_ profile: ProfileDTO, using clipboardService: ClipboardService) async {
-        guard syncEnabled else { return }
+    @discardableResult
+    public func handleRemoteProfileChange(_ profile: ProfileDTO, using clipboardService: ClipboardService) async -> Bool {
+        guard syncEnabled else { return false }
 
         do {
             let transferData: Data?
@@ -84,7 +87,7 @@ public final class SyncCoordinator {
             }
 
             let snapshot = try ClipboardSnapshot.fromRemote(dto: profile, transferData: transferData)
-            guard tracker.shouldApplyRemote(snapshot) else { return }
+            guard tracker.shouldApplyRemote(snapshot) else { return true }
 
             try clipboardService.write(snapshot)
 
@@ -96,9 +99,11 @@ public final class SyncCoordinator {
             if showNotifications {
                 notifier.notify(title: "Clipboard Updated", body: snapshot.previewText)
             }
+            return true
         } catch {
             diagnostics.lastError = error.localizedDescription
             diagnosticsHandler?(diagnostics)
+            return false
         }
     }
 }

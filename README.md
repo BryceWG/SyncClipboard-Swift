@@ -10,7 +10,7 @@ Native macOS rewrite of SyncClipboard focused on low-memory clipboard sync.
 - Core clipboard sync only
 - Text sync
 - Basic image sync using PNG transfer
-- Realtime sync via SignalR plus explicit HTTP refresh path
+- Realtime sync via SignalR or periodic HTTP polling
 - Launch at Login
 - User notifications
 
@@ -43,9 +43,19 @@ This client keeps compatibility with the current self-hosted SyncClipboard serve
 - `GET /file/{dataName}`
 - `PUT /file/{dataName}`
 - `GET/POST /SyncClipboardHub/negotiate`
-- `WS/SSE/LongPolling /SyncClipboardHub`
+- `/SyncClipboardHub` for realtime mode
 
-The current implementation uses the official Swift SignalR client for realtime remote updates and keeps a one-shot HTTP refresh path for explicit manual syncs.
+The current implementation offers two receive modes:
+
+- `Realtime`: uses the official Swift SignalR client for push-style remote updates
+- `Polling`: periodically refreshes the remote clipboard over HTTP
+
+Additional runtime controls now available in Settings:
+
+- `Polling Interval`: controls how often polling mode refreshes the clipboard
+- `Auto Reconnect`: for realtime mode, reconnects automatically after network loss
+- `Auto Retry`: for polling mode, keeps retrying after transient request failures
+- wake recovery: when automatic recovery is enabled, the app refreshes or reconnects after the Mac wakes from sleep
 
 ## Build System Status
 
@@ -186,7 +196,8 @@ lipo -archs dist/SyncClipboard-Swift.app/Contents/MacOS/SyncClipboard-Swift
 
 ## Runtime Notes
 
-- This is a menu bar app. `LSUIElement` is enabled, so launch does not create a Dock icon.
+- This is a menu bar app with a native Dock presence by default.
+- The Dock icon can be hidden at runtime from Settings.
 - The settings UI is opened from the menu bar icon, or automatically on first launch when server configuration is missing.
 - Launch at Login is expected to work most reliably after the app is placed in `/Applications`.
 - Notifications are requested at runtime when notifications are enabled.

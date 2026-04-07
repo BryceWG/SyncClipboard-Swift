@@ -24,8 +24,10 @@
     <string>__BUILD_VERSION__</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
     <key>LSUIElement</key>
-    <true/>
+    <false/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>

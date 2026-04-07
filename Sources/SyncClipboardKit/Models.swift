@@ -2,6 +2,40 @@ import Foundation
 
 public let textTransferThreshold = 10_240
 
+public enum RemoteReceiveMode: String, Codable, Equatable, Sendable, CaseIterable, Identifiable {
+    case realtime
+    case polling
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .realtime:
+            return "Realtime"
+        case .polling:
+            return "Polling"
+        }
+    }
+
+    public var detailText: String {
+        switch self {
+        case .realtime:
+            return "Use the server's long-lived realtime channel for immediate remote updates."
+        case .polling:
+            return "Periodically fetch the latest clipboard over HTTP instead of keeping a live connection."
+        }
+    }
+
+    static func fromLegacyTransportRawValue(_ rawValue: String?) -> Self? {
+        switch rawValue {
+        case "automatic", "webSockets", "serverSentEvents", "longPolling":
+            return .realtime
+        default:
+            return nil
+        }
+    }
+}
+
 public enum ProfileType: String, Codable, Sendable, CaseIterable {
     case text = "Text"
     case file = "File"
@@ -18,6 +52,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var syncEnabled: Bool
     public var launchAtLogin: Bool
     public var showNotifications: Bool
+    public var showDockIcon: Bool
+    public var receiveMode: RemoteReceiveMode
+    public var pollingIntervalSeconds: Double
+    public var autoReconnect: Bool
 
     public init(
         serverURL: String = "",
@@ -25,7 +63,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         keychainAccount: String = "default",
         syncEnabled: Bool = false,
         launchAtLogin: Bool = false,
-        showNotifications: Bool = true
+        showNotifications: Bool = true,
+        showDockIcon: Bool = true,
+        receiveMode: RemoteReceiveMode = .realtime,
+        pollingIntervalSeconds: Double = 1.0,
+        autoReconnect: Bool = true
     ) {
         self.serverURL = serverURL
         self.username = username
@@ -33,6 +75,62 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.syncEnabled = syncEnabled
         self.launchAtLogin = launchAtLogin
         self.showNotifications = showNotifications
+        self.showDockIcon = showDockIcon
+        self.receiveMode = receiveMode
+        self.pollingIntervalSeconds = Self.clampedPollingInterval(pollingIntervalSeconds)
+        self.autoReconnect = autoReconnect
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case serverURL
+        case username
+        case keychainAccount
+        case syncEnabled
+        case launchAtLogin
+        case showNotifications
+        case showDockIcon
+        case receiveMode
+        case pollingIntervalSeconds
+        case autoReconnect
+        case realtimeTransportMode
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.serverURL = try container.decodeIfPresent(String.self, forKey: .serverURL) ?? ""
+        self.username = try container.decodeIfPresent(String.self, forKey: .username) ?? ""
+        self.keychainAccount = try container.decodeIfPresent(String.self, forKey: .keychainAccount) ?? "default"
+        self.syncEnabled = try container.decodeIfPresent(Bool.self, forKey: .syncEnabled) ?? false
+        self.launchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
+        self.showNotifications = try container.decodeIfPresent(Bool.self, forKey: .showNotifications) ?? true
+        self.showDockIcon = try container.decodeIfPresent(Bool.self, forKey: .showDockIcon) ?? true
+        if let receiveMode = try container.decodeIfPresent(RemoteReceiveMode.self, forKey: .receiveMode) {
+            self.receiveMode = receiveMode
+        } else {
+            let legacyTransport = try container.decodeIfPresent(String.self, forKey: .realtimeTransportMode)
+            self.receiveMode = RemoteReceiveMode.fromLegacyTransportRawValue(legacyTransport) ?? .realtime
+        }
+        let pollingInterval = try container.decodeIfPresent(Double.self, forKey: .pollingIntervalSeconds) ?? 1.0
+        self.pollingIntervalSeconds = Self.clampedPollingInterval(pollingInterval)
+        self.autoReconnect = try container.decodeIfPresent(Bool.self, forKey: .autoReconnect) ?? true
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(serverURL, forKey: .serverURL)
+        try container.encode(username, forKey: .username)
+        try container.encode(keychainAccount, forKey: .keychainAccount)
+        try container.encode(syncEnabled, forKey: .syncEnabled)
+        try container.encode(launchAtLogin, forKey: .launchAtLogin)
+        try container.encode(showNotifications, forKey: .showNotifications)
+        try container.encode(showDockIcon, forKey: .showDockIcon)
+        try container.encode(receiveMode, forKey: .receiveMode)
+        try container.encode(Self.clampedPollingInterval(pollingIntervalSeconds), forKey: .pollingIntervalSeconds)
+        try container.encode(autoReconnect, forKey: .autoReconnect)
+    }
+
+    private static func clampedPollingInterval(_ value: Double) -> Double {
+        min(max(value, 0.5), 60.0)
     }
 }
 
@@ -40,11 +138,21 @@ public struct ServerConfiguration: Equatable, Sendable {
     public let baseURL: URL
     public let username: String
     public let password: String
+    public let receiveMode: RemoteReceiveMode
+    public let autoReconnect: Bool
 
-    public init(baseURL: URL, username: String, password: String) {
+    public init(
+        baseURL: URL,
+        username: String,
+        password: String,
+        receiveMode: RemoteReceiveMode = .realtime,
+        autoReconnect: Bool = true
+    ) {
         self.baseURL = baseURL
         self.username = username
         self.password = password
+        self.receiveMode = receiveMode
+        self.autoReconnect = autoReconnect
     }
 }
 
