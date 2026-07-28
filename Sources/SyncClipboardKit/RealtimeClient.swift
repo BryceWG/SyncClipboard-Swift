@@ -70,6 +70,12 @@ struct RealtimeRefreshContext: Equatable {
     let connectionToken: UUID?
 }
 
+enum RealtimePollStrategy: Equatable {
+    case skip
+    case fetchCurrentProfile
+    case restartConnection
+}
+
 @MainActor
 public enum RealtimeClientFactory {
     public static func make(httpClient: SyncClipboardHTTPClient) -> RealtimeClient {
@@ -127,10 +133,22 @@ public final class SignalRRealtimeClient: RealtimeClient {
     }
 
     public func pollNow() async {
-        guard let context = currentRefreshContext() else {
+        guard let configuration = desiredConfiguration else {
             return
         }
 
+        let strategy = await pollStrategy(for: configuration)
+
+        switch strategy {
+        case .skip:
+            return
+        case .restartConnection:
+            await replaceConnection(with: configuration, resetFingerprint: false)
+        case .fetchCurrentProfile:
+            break
+        }
+
+        let context = RealtimeRefreshContext(configuration: configuration, connectionToken: connectionToken)
         await fetchAndEmitCurrentProfile(using: context, forceEmit: true)
     }
 
@@ -367,6 +385,15 @@ public final class SignalRRealtimeClient: RealtimeClient {
         return RealtimeRefreshContext(configuration: configuration, connectionToken: connectionToken)
     }
 
+    private func pollStrategy(for configuration: ServerConfiguration) async -> RealtimePollStrategy {
+        let connectionState = await hubConnection?.state()
+        return Self.pollStrategy(
+            hubConnectionState: connectionState,
+            autoReconnectEnabled: configuration.autoReconnect,
+            isCurrentConfiguration: desiredConfiguration == configuration
+        )
+    }
+
     private func isCurrentRefreshContext(_ context: RealtimeRefreshContext) -> Bool {
         Self.isCurrentRefreshContext(
             context,
@@ -389,6 +416,27 @@ public final class SignalRRealtimeClient: RealtimeClient {
         }
 
         return currentConnectionToken == contextToken
+    }
+
+    nonisolated static func pollStrategy(
+        hubConnectionState: HubConnectionState?,
+        autoReconnectEnabled: Bool,
+        isCurrentConfiguration: Bool
+    ) -> RealtimePollStrategy {
+        guard isCurrentConfiguration else {
+            return .skip
+        }
+
+        guard let hubConnectionState else {
+            return autoReconnectEnabled ? .restartConnection : .fetchCurrentProfile
+        }
+
+        switch hubConnectionState {
+        case .Stopped:
+            return autoReconnectEnabled ? .restartConnection : .fetchCurrentProfile
+        case .Connecting, .Connected, .Reconnecting:
+            return .fetchCurrentProfile
+        }
     }
 
     nonisolated static func terminalStateAfterClose(error: Error?, autoReconnectEnabled: Bool) -> RealtimeState? {

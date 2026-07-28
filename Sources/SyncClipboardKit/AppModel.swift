@@ -32,20 +32,25 @@ public final class AppModel: ObservableObject {
     private let realtimeClient: any RealtimeClient
     private let coordinator: SyncCoordinator
     private let launchAtLoginManager: any LaunchAtLoginManaging
+    private let realtimeHealthCheckIntervalSeconds: TimeInterval
     private var pollingTask: Task<Void, Never>?
+    private var realtimeHealthTask: Task<Void, Never>?
 
     public init(
         settingsStore: any SettingsStoring = SettingsStore(),
         keychainStore: any KeychainStoring = KeychainStore(),
         httpClient: SyncClipboardHTTPClient = SyncClipboardHTTPClient(),
         clipboardService: any ClipboardServicing = ClipboardService(),
-        launchAtLoginManager: any LaunchAtLoginManaging = LaunchAtLoginManager()
+        launchAtLoginManager: any LaunchAtLoginManaging = LaunchAtLoginManager(),
+        realtimeClient: (any RealtimeClient)? = nil,
+        realtimeHealthCheckIntervalSeconds: TimeInterval = 15
     ) {
         self.settingsStore = settingsStore
         self.keychainStore = keychainStore
         self.httpClient = httpClient
         self.clipboardService = clipboardService
         self.launchAtLoginManager = launchAtLoginManager
+        self.realtimeHealthCheckIntervalSeconds = max(realtimeHealthCheckIntervalSeconds, 5)
         self.clipboardMonitor = ClipboardMonitor()
 
         let loadedSettings = (try? settingsStore.load()) ?? AppSettings()
@@ -63,7 +68,7 @@ public final class AppModel: ObservableObject {
         self.autoReconnect = loadedSettings.autoReconnect
 
         let notifier = UserNotifier()
-        self.realtimeClient = RealtimeClientFactory.make(httpClient: httpClient)
+        self.realtimeClient = realtimeClient ?? RealtimeClientFactory.make(httpClient: httpClient)
         self.coordinator = SyncCoordinator(httpClient: httpClient, notifier: notifier)
 
         self.clipboardMonitor.onChange = { [weak self] in
@@ -97,6 +102,7 @@ public final class AppModel: ObservableObject {
         clipboardMonitor.stop()
         clipboardMonitor.onChange = nil
         stopPollingLoop()
+        stopRealtimeHealthLoop()
         realtimeClient.onProfileChanged = nil
         realtimeClient.onStateChange = nil
         coordinator.diagnosticsHandler = nil
@@ -160,7 +166,20 @@ public final class AppModel: ObservableObject {
     }
 
     public func syncNow() async {
+        await performExplicitSyncCycle()
+    }
+
+    func performRealtimeHealthCheckCycle() async {
+        guard syncEnabled, autoReconnect, !requiresSetup, receiveMode == .realtime else {
+            return
+        }
+
+        await performExplicitSyncCycle()
+    }
+
+    private func performExplicitSyncCycle() async {
         httpClient.updateConfiguration(buildServerConfiguration())
+        coordinator.updatePreferences(syncEnabled: syncEnabled, showNotifications: showNotifications)
         await coordinator.handleLocalPasteboardChange(using: clipboardService)
         switch receiveMode {
         case .realtime:
@@ -202,6 +221,7 @@ public final class AppModel: ObservableObject {
 
         guard let configuration, syncEnabled else {
             stopPollingLoop()
+            stopRealtimeHealthLoop()
             connectionStatusText = syncEnabled ? "Missing Config" : "Disabled"
             await realtimeClient.stop()
             return
@@ -211,10 +231,12 @@ public final class AppModel: ObservableObject {
         case .realtime:
             stopPollingLoop()
             await realtimeClient.start(configuration: configuration)
+            startRealtimeHealthLoop()
             if forceRefresh {
                 _ = await coordinator.refreshFromServer(using: clipboardService)
             }
         case .polling:
+            stopRealtimeHealthLoop()
             await realtimeClient.stop()
             connectionStatusText = "Polling"
             startPollingLoop(forceRefresh: forceRefresh)
@@ -302,6 +324,40 @@ public final class AppModel: ObservableObject {
     private func stopPollingLoop() {
         pollingTask?.cancel()
         pollingTask = nil
+    }
+
+    private func startRealtimeHealthLoop() {
+        stopRealtimeHealthLoop()
+
+        guard syncEnabled, autoReconnect, !requiresSetup, receiveMode == .realtime else {
+            return
+        }
+
+        let interval = realtimeHealthCheckIntervalSeconds
+        realtimeHealthTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                } catch {
+                    break
+                }
+
+                guard !Task.isCancelled else {
+                    break
+                }
+
+                await self.performRealtimeHealthCheckCycle()
+            }
+
+            self.realtimeHealthTask = nil
+        }
+    }
+
+    private func stopRealtimeHealthLoop() {
+        realtimeHealthTask?.cancel()
+        realtimeHealthTask = nil
     }
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {

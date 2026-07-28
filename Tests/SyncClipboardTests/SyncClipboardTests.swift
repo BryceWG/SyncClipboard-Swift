@@ -65,15 +65,20 @@ private final class FakeClipboardService: ClipboardServicing {
 }
 
 private final class FakeSettingsStore: SettingsStoring {
+    private let loadedSettings: AppSettings
     private let onSave: (AppSettings) throws -> Void
     private(set) var savedSettings: [AppSettings] = []
 
-    init(onSave: @escaping (AppSettings) throws -> Void = { _ in }) {
+    init(
+        loadedSettings: AppSettings = AppSettings(),
+        onSave: @escaping (AppSettings) throws -> Void = { _ in }
+    ) {
+        self.loadedSettings = loadedSettings
         self.onSave = onSave
     }
 
     func load() throws -> AppSettings {
-        AppSettings()
+        loadedSettings
     }
 
     func save(_ settings: AppSettings) throws {
@@ -83,15 +88,20 @@ private final class FakeSettingsStore: SettingsStoring {
 }
 
 private final class FakeKeychainStore: KeychainStoring {
+    private let storedPassword: String?
     private let onSave: (String, String) throws -> Void
     private(set) var savedPasswords: [(account: String, password: String)] = []
 
-    init(onSave: @escaping (String, String) throws -> Void = { _, _ in }) {
+    init(
+        readPassword: String? = nil,
+        onSave: @escaping (String, String) throws -> Void = { _, _ in }
+    ) {
+        self.storedPassword = readPassword
         self.onSave = onSave
     }
 
     func readPassword(account: String) throws -> String? {
-        nil
+        storedPassword
     }
 
     func savePassword(_ password: String, account: String) throws {
@@ -123,6 +133,28 @@ private final class FakeLaunchAtLoginManager: LaunchAtLoginManaging {
         } else {
             status = enabled ? .enabled : .disabled
         }
+    }
+}
+
+@MainActor
+private final class FakeRealtimeClient: RealtimeClient {
+    var onProfileChanged: (@Sendable (ProfileDTO) -> Void)?
+    var onStateChange: (@Sendable (RealtimeState) -> Void)?
+
+    private(set) var startedConfigurations: [ServerConfiguration] = []
+    private(set) var stopCount = 0
+    private(set) var pollCount = 0
+
+    func start(configuration: ServerConfiguration) async {
+        startedConfigurations.append(configuration)
+    }
+
+    func stop() async {
+        stopCount += 1
+    }
+
+    func pollNow() async {
+        pollCount += 1
     }
 }
 
@@ -584,6 +616,52 @@ final class SyncClipboardTests: XCTestCase {
         )
     }
 
+    func testRealtimePollStrategyRestartsMissingOrStoppedConnectionWhenAutoReconnectEnabled() {
+        XCTAssertEqual(
+            SignalRRealtimeClient.pollStrategy(
+                hubConnectionState: nil,
+                autoReconnectEnabled: true,
+                isCurrentConfiguration: true
+            ),
+            .restartConnection
+        )
+        XCTAssertEqual(
+            SignalRRealtimeClient.pollStrategy(
+                hubConnectionState: .Stopped,
+                autoReconnectEnabled: true,
+                isCurrentConfiguration: true
+            ),
+            .restartConnection
+        )
+    }
+
+    func testRealtimePollStrategyFetchesForActiveConnectionsAndSkipsSupersededConfigs() {
+        XCTAssertEqual(
+            SignalRRealtimeClient.pollStrategy(
+                hubConnectionState: .Connected,
+                autoReconnectEnabled: true,
+                isCurrentConfiguration: true
+            ),
+            .fetchCurrentProfile
+        )
+        XCTAssertEqual(
+            SignalRRealtimeClient.pollStrategy(
+                hubConnectionState: .Reconnecting,
+                autoReconnectEnabled: false,
+                isCurrentConfiguration: true
+            ),
+            .fetchCurrentProfile
+        )
+        XCTAssertEqual(
+            SignalRRealtimeClient.pollStrategy(
+                hubConnectionState: .Stopped,
+                autoReconnectEnabled: true,
+                isCurrentConfiguration: false
+            ),
+            .skip
+        )
+    }
+
     @MainActor
     func testPollingConnectionDoesNotRequireSignalRHub() async throws {
         let log = RequestLog()
@@ -624,6 +702,113 @@ final class SyncClipboardTests: XCTestCase {
                 "GET https://example.com/sync/api/time",
             ]
         )
+    }
+
+    @MainActor
+    func testRealtimeHealthCheckPerformsExplicitSyncCycleWhenAutoReconnectEnabled() async {
+        let log = RequestLog()
+        let session = makeMockSession()
+        let httpClient = SyncClipboardHTTPClient(session: session)
+        let clipboardService = FakeClipboardService()
+        let realtimeClient = FakeRealtimeClient()
+        let settingsStore = FakeSettingsStore(
+            loadedSettings: AppSettings(
+                serverURL: "https://example.com/sync/",
+                username: "alice",
+                keychainAccount: "primary",
+                syncEnabled: true,
+                launchAtLogin: false,
+                showNotifications: false,
+                showDockIcon: true,
+                receiveMode: .realtime,
+                pollingIntervalSeconds: 1.0,
+                autoReconnect: true
+            )
+        )
+        let keychainStore = FakeKeychainStore(readPassword: "secret")
+
+        clipboardService.nextSnapshot = .text("local text")
+
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+            log.append("\(request.httpMethod ?? "GET") \(url.absoluteString)")
+
+            switch (request.httpMethod, url.path) {
+            case ("PUT", "/sync/SyncClipboard.json"):
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data()
+                )
+            default:
+                XCTFail("Unexpected request: \(request.httpMethod ?? "GET") \(url.absoluteString)")
+                return (
+                    HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!,
+                    Data()
+                )
+            }
+        }
+
+        let model = AppModel(
+            settingsStore: settingsStore,
+            keychainStore: keychainStore,
+            httpClient: httpClient,
+            clipboardService: clipboardService,
+            launchAtLoginManager: FakeLaunchAtLoginManager(),
+            realtimeClient: realtimeClient
+        )
+
+        await model.performRealtimeHealthCheckCycle()
+
+        XCTAssertEqual(
+            log.snapshot,
+            ["PUT https://example.com/sync/SyncClipboard.json"]
+        )
+        XCTAssertEqual(realtimeClient.pollCount, 1)
+    }
+
+    @MainActor
+    func testRealtimeHealthCheckSkipsWhenAutoReconnectDisabled() async {
+        let session = makeMockSession()
+        let httpClient = SyncClipboardHTTPClient(session: session)
+        let clipboardService = FakeClipboardService()
+        let realtimeClient = FakeRealtimeClient()
+        let settingsStore = FakeSettingsStore(
+            loadedSettings: AppSettings(
+                serverURL: "https://example.com/sync/",
+                username: "alice",
+                keychainAccount: "primary",
+                syncEnabled: true,
+                launchAtLogin: false,
+                showNotifications: false,
+                showDockIcon: true,
+                receiveMode: .realtime,
+                pollingIntervalSeconds: 1.0,
+                autoReconnect: false
+            )
+        )
+        let keychainStore = FakeKeychainStore(readPassword: "secret")
+
+        clipboardService.nextSnapshot = .text("local text")
+        MockURLProtocol.requestHandler = { request in
+            XCTFail("Unexpected request: \(request)")
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!,
+                Data()
+            )
+        }
+
+        let model = AppModel(
+            settingsStore: settingsStore,
+            keychainStore: keychainStore,
+            httpClient: httpClient,
+            clipboardService: clipboardService,
+            launchAtLoginManager: FakeLaunchAtLoginManager(),
+            realtimeClient: realtimeClient
+        )
+
+        await model.performRealtimeHealthCheckCycle()
+
+        XCTAssertEqual(realtimeClient.pollCount, 0)
     }
 
     @MainActor
