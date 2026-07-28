@@ -30,6 +30,11 @@ final class StatusMenuController {
         settingsItem.target = self
         quitItem.target = self
 
+        statusLineItem.image = Self.symbolImage(named: "doc.on.clipboard")
+        syncNowItem.image = Self.symbolImage(named: "arrow.triangle.2.circlepath")
+        settingsItem.image = Self.symbolImage(named: "gearshape")
+        quitItem.image = Self.symbolImage(named: "power")
+
         let menu = NSMenu()
         statusLineItem.isEnabled = false
         menu.addItem(statusLineItem)
@@ -106,6 +111,10 @@ final class StatusMenuController {
             button.image = nil
             button.title = "SC"
         }
+    }
+
+    private static func symbolImage(named name: String) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: nil)
     }
 
     private static func loadTrayImage(named name: String) -> NSImage? {
