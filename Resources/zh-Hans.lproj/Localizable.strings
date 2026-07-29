@@ -67,5 +67,6 @@
 "File Uploaded" = "文件已上传";
 "File Downloaded" = "文件已下载";
 "Nothing to Transfer" = "没有可传输的内容";
-"The same image is already on the server." = "服务器上已有相同的图片。";
 "No remote image or file is available." = "服务器上没有可用的图片或文件。";
+"The latest image or file is already local." = "最新的图片或文件已在本地。";
+"The latest file has already been downloaded." = "最新的文件已经下载过了。";

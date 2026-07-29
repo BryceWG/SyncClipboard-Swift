@@ -3,6 +3,7 @@ import Foundation
 
 @MainActor
 public protocol ClipboardServicing: AnyObject {
+    var changeCount: Int { get }
     func readFileURLs() -> [URL]
     func readCurrentSnapshot() throws -> ClipboardSnapshot?
     func write(_ snapshot: ClipboardSnapshot) throws
@@ -11,6 +12,10 @@ public protocol ClipboardServicing: AnyObject {
 @MainActor
 public final class ClipboardService: ClipboardServicing {
     public init() {}
+
+    public var changeCount: Int {
+        NSPasteboard.general.changeCount
+    }
 
     public func readFileURLs() -> [URL] {
         NSPasteboard.general.readObjects(
@@ -71,7 +76,7 @@ public final class ClipboardService: ClipboardServicing {
 
 @MainActor
 public final class ClipboardMonitor {
-    public var onChange: (() -> Void)?
+    public var onChange: ((Int, Date) -> Void)?
 
     private let interval: TimeInterval
     private var timer: Timer?
@@ -110,10 +115,11 @@ public final class ClipboardMonitor {
         }
 
         lastChangeCount = currentChangeCount
+        let observedAt = Date()
         debounceItem?.cancel()
 
         let item = DispatchWorkItem { [weak self] in
-            self?.onChange?()
+            self?.onChange?(currentChangeCount, observedAt)
         }
         debounceItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: item)

@@ -14,6 +14,47 @@ public struct SyncDiagnostics: Sendable {
 
 @MainActor
 public final class SyncCoordinator {
+    private struct PasteboardObservation {
+        let changeCount: Int
+        let observedAt: Date
+    }
+
+    private struct ImageProvenance {
+        let serverIdentity: String
+        let profileID: String
+        let changeCount: Int
+    }
+
+    private struct FileDownloadReceipt {
+        let serverIdentity: String
+        let profileID: String
+        let destination: URL
+    }
+
+    private struct LocalHistoryCandidate {
+        let type: ProfileType
+        let hash: String
+        let prepared: PreparedTransferFile
+
+        var profileID: String {
+            "\(type.rawValue)-\(hash.uppercased())"
+        }
+    }
+
+    private enum LocalBinaryCandidate {
+        case upload(LocalHistoryCandidate)
+        case knownRemote(profileID: String)
+
+        var profileID: String {
+            switch self {
+            case .upload(let candidate):
+                return candidate.profileID
+            case .knownRemote(let profileID):
+                return profileID
+            }
+        }
+    }
+
     private let httpClient: SyncClipboardHTTPClient
     private let notifier: UserNotifier
     private let downloadsDirectory: URL
@@ -23,6 +64,9 @@ public final class SyncCoordinator {
     private var syncEnabled = false
     private var showNotifications = true
     private var inFlightRemoteFingerprint: String?
+    private var lastPasteboardObservation: PasteboardObservation?
+    private var imageProvenance: ImageProvenance?
+    private var fileDownloadReceipt: FileDownloadReceipt?
     public var diagnosticsHandler: ((SyncDiagnostics) -> Void)?
 
     public init(
@@ -43,8 +87,22 @@ public final class SyncCoordinator {
         }
     }
 
-    public func handleLocalPasteboardChange(using clipboardService: any ClipboardServicing) async {
+    public func handleLocalPasteboardChange(
+        using clipboardService: any ClipboardServicing,
+        changeCount: Int? = nil,
+        observedAt: Date = Date()
+    ) async {
         guard syncEnabled else { return }
+
+        if let changeCount {
+            lastPasteboardObservation = PasteboardObservation(
+                changeCount: changeCount,
+                observedAt: observedAt
+            )
+            if imageProvenance?.changeCount != changeCount {
+                imageProvenance = nil
+            }
+        }
 
         do {
             let snapshot = try clipboardService.readCurrentSnapshot()
@@ -132,82 +190,59 @@ public final class SyncCoordinator {
         guard syncEnabled else { return false }
 
         do {
-            let fileURLs = clipboardService.readFileURLs()
-            if !fileURLs.isEmpty {
-                let prepared = try await FileTransfer.prepareUpload(urls: fileURLs, maximumBytes: maximumBytes)
-                defer { prepared.cleanup() }
-                let hash = try await Task.detached {
-                    try Hashing.fileProfileHash(fileName: prepared.name, fileURL: prepared.url)
-                }.value
-                try await httpClient.uploadFile(
-                    at: prepared.url,
-                    name: prepared.name,
-                    mimeType: prepared.url.pathExtension.lowercased() == "zip"
-                        ? "application/zip"
-                        : "application/octet-stream"
+            guard let configuration = httpClient.configuration else {
+                throw SyncClipboardError.missingServerConfiguration
+            }
+            let actionDate = Date()
+            let local = try await captureLocalBinary(
+                using: clipboardService,
+                maximumBytes: maximumBytes,
+                actionDate: actionDate,
+                configuration: configuration
+            )
+            defer {
+                if case .upload(let candidate) = local {
+                    candidate.prepared.cleanup()
+                }
+            }
+
+            let uploaded: Bool
+            if case .upload(let candidate) = local {
+                uploaded = try await ensureHistory(
+                    for: candidate,
+                    configuration: configuration
                 )
-                try await httpClient.setCurrentProfile(ProfileDTO(
-                    type: .file,
-                    hash: hash,
-                    text: prepared.name,
-                    hasData: true,
-                    dataName: prepared.name,
-                    size: prepared.size
-                ))
-                completeManualTransfer(push: true, message: prepared.name)
-                return true
+            } else {
+                uploaded = false
             }
 
-            let localSnapshot = try clipboardService.readCurrentSnapshot()
-            if let localSnapshot, localSnapshot.type == .image {
-                guard localSnapshot.size <= maximumBytes else {
-                    throw SyncClipboardError.transferTooLarge(maximumBytes)
+            guard let remote = try await latestBinaryHistory(configuration: configuration) else {
+                if uploaded, case .upload(let candidate) = local {
+                    throw SyncClipboardError.historyDataMissing(candidate.profileID)
                 }
-                let remote = try await httpClient.fetchCurrentProfile()
-                guard remote.type != .image || remote.hash != localSnapshot.hash else {
-                    notifyManualSkip(NSLocalizedString("The same image is already on the server.", bundle: .main, comment: "Manual transfer skip message"))
-                    return true
-                }
-                guard let data = localSnapshot.transferData, let name = localSnapshot.dataName else {
-                    throw SyncClipboardError.missingTransferData(.image)
-                }
-                try await httpClient.uploadFile(data: data, name: name, mimeType: "image/png")
-                try await httpClient.setCurrentProfile(localSnapshot.profileDTO)
-                tracker.markUploaded(localSnapshot)
-                completeManualTransfer(push: true, message: name)
-                return true
-            }
-
-            let remote = try await httpClient.fetchCurrentProfile()
-            guard remote.type == .image || remote.type == .file || remote.type == .group else {
                 notifyManualSkip(NSLocalizedString("No remote image or file is available.", bundle: .main, comment: "Manual transfer skip message"))
                 return true
             }
-            guard remote.size <= maximumBytes else {
-                throw SyncClipboardError.transferTooLarge(maximumBytes)
-            }
-            guard remote.hasData, let proposedName = remote.dataName else {
-                throw SyncClipboardError.missingTransferData(remote.type)
-            }
-            let name = try FileTransfer.safeFileName(proposedName)
-            let temporaryURL = try await httpClient.downloadFile(named: name, maximumBytes: maximumBytes)
-            defer { try? FileManager.default.removeItem(at: temporaryURL) }
 
-            if remote.type == .image {
-                let data = try await Task.detached { try Data(contentsOf: temporaryURL) }.value
-                let snapshot = try ClipboardSnapshot.fromRemote(dto: remote, transferData: data)
-                try clipboardService.write(snapshot)
-                tracker.markAppliedRemote(snapshot)
-                completeManualTransfer(push: false, message: name)
-            } else {
-                let destination = try await FileTransfer.saveDownloadedFile(
-                    temporaryURL,
-                    suggestedName: name,
-                    downloadsDirectory: downloadsDirectory
-                )
-                completeManualTransfer(push: false, message: destination.path)
+            let remoteID = try remote.profileID
+            if remoteID == local?.profileID {
+                if uploaded, case .upload(let candidate) = local {
+                    completeManualTransfer(push: true, message: candidate.prepared.name)
+                } else {
+                    notifyManualSkip(NSLocalizedString("The latest image or file is already local.", bundle: .main, comment: "Manual transfer skip message"))
+                }
+                return true
             }
-            return true
+
+            if uploaded {
+                diagnostics.lastPushAt = Date()
+            }
+            return try await pullRemoteHistory(
+                remote,
+                using: clipboardService,
+                maximumBytes: maximumBytes,
+                configuration: configuration
+            )
         } catch {
             diagnostics.lastError = error.localizedDescription
             diagnosticsHandler?(diagnostics)
@@ -216,6 +251,244 @@ public final class SyncCoordinator {
             }
             return false
         }
+    }
+
+    private func captureLocalBinary(
+        using clipboardService: any ClipboardServicing,
+        maximumBytes: Int64,
+        actionDate: Date,
+        configuration: ServerConfiguration
+    ) async throws -> LocalBinaryCandidate? {
+        let changeCount = clipboardService.changeCount
+        let observationDate = lastPasteboardObservation?.changeCount == changeCount
+            ? lastPasteboardObservation?.observedAt
+            : nil
+        let fileURLs = clipboardService.readFileURLs()
+        if !fileURLs.isEmpty {
+            let prepared = try await FileTransfer.prepareUpload(
+                urls: fileURLs,
+                maximumBytes: maximumBytes,
+                observationDate: observationDate,
+                actionDate: actionDate
+            )
+            let hash = try await Task.detached {
+                try Hashing.fileProfileHash(fileName: prepared.name, fileURL: prepared.url)
+            }.value
+            return .upload(LocalHistoryCandidate(type: .file, hash: hash, prepared: prepared))
+        }
+
+        guard let snapshot = try clipboardService.readCurrentSnapshot(), snapshot.type == .image else {
+            return nil
+        }
+        let identity = serverIdentity(configuration)
+        if let provenance = imageProvenance,
+           provenance.changeCount == changeCount,
+           provenance.serverIdentity == identity {
+            return .knownRemote(profileID: provenance.profileID)
+        }
+        guard let data = snapshot.transferData, let name = snapshot.dataName else {
+            throw SyncClipboardError.missingTransferData(.image)
+        }
+        let prepared = try await FileTransfer.prepareImage(
+            data: data,
+            name: name,
+            maximumBytes: maximumBytes,
+            eventDate: observationDate ?? actionDate
+        )
+        return .upload(LocalHistoryCandidate(type: .image, hash: snapshot.hash, prepared: prepared))
+    }
+
+    private func ensureHistory(
+        for candidate: LocalHistoryCandidate,
+        configuration: ServerConfiguration
+    ) async throws -> Bool {
+        let existing = try await httpClient.fetchHistoryRecord(
+            profileID: candidate.profileID,
+            configuration: configuration
+        )
+        if let existing, !existing.isDeleted {
+            guard existing.hasData else {
+                throw SyncClipboardError.historyDataMissing(candidate.profileID)
+            }
+            return false
+        }
+
+        let localBefore = Date()
+        let serverTime = try await httpClient.fetchServerTime(configuration: configuration)
+        let localAfter = Date()
+        let localMidpoint = Date(
+            timeIntervalSinceReferenceDate:
+                (localBefore.timeIntervalSinceReferenceDate + localAfter.timeIntervalSinceReferenceDate) / 2
+        )
+        let correctedEventDate = candidate.prepared.eventDate.addingTimeInterval(
+            serverTime.timeIntervalSince(localMidpoint)
+        )
+        let record = HistoryRecordDTO(
+            hash: candidate.hash,
+            text: candidate.prepared.name,
+            type: candidate.type,
+            createTime: existing?.createTime ?? correctedEventDate,
+            lastModified: correctedEventDate,
+            lastAccessed: correctedEventDate,
+            starred: existing?.starred ?? false,
+            pinned: existing?.pinned ?? false,
+            size: candidate.prepared.size,
+            hasData: true,
+            version: existing.map { max($0.version + 1, 1) } ?? 0,
+            isDeleted: false
+        )
+        let uploaded = try await httpClient.uploadHistory(
+            record,
+            dataFileURL: candidate.prepared.url,
+            fileName: candidate.prepared.name,
+            configuration: configuration
+        )
+        guard !uploaded.isDeleted, uploaded.hasData else {
+            throw SyncClipboardError.historyDataMissing(candidate.profileID)
+        }
+        return true
+    }
+
+    private func latestBinaryHistory(configuration: ServerConfiguration) async throws -> HistoryRecordDTO? {
+        var page = 1
+        while true {
+            let records = try await httpClient.fetchHistoryPage(page: page, configuration: configuration)
+            for record in records where !record.isDeleted {
+                let profileID = try record.profileID
+                guard record.hasData else {
+                    throw SyncClipboardError.historyDataMissing(profileID)
+                }
+                return record
+            }
+            guard records.count == 50 else {
+                return nil
+            }
+            page += 1
+        }
+    }
+
+    private func pullRemoteHistory(
+        _ initial: HistoryRecordDTO,
+        using clipboardService: any ClipboardServicing,
+        maximumBytes: Int64,
+        configuration: ServerConfiguration
+    ) async throws -> Bool {
+        var remote = initial
+
+        for attempt in 0 ... 1 {
+            let profileID = try remote.profileID
+            let identity = serverIdentity(configuration)
+            if remote.type != .image,
+               let receipt = fileDownloadReceipt,
+               receipt.serverIdentity == identity,
+               receipt.profileID == profileID,
+               FileManager.default.fileExists(atPath: receipt.destination.path) {
+                notifyManualSkip(NSLocalizedString("The latest file has already been downloaded.", bundle: .main, comment: "Manual transfer skip message"))
+                return true
+            }
+            guard remote.size >= 0, remote.size <= maximumBytes else {
+                throw SyncClipboardError.transferTooLarge(maximumBytes)
+            }
+
+            let downloaded = try await httpClient.downloadHistoryData(
+                profileID: profileID,
+                maximumBytes: maximumBytes,
+                configuration: configuration
+            )
+            let temporaryURL = downloaded.url
+            defer { try? FileManager.default.removeItem(at: temporaryURL) }
+
+            guard httpClient.configuration == configuration else {
+                throw SyncClipboardError.serverConfigurationChanged
+            }
+            let barrier = try await latestBinaryHistory(configuration: configuration)
+            guard httpClient.configuration == configuration else {
+                throw SyncClipboardError.serverConfigurationChanged
+            }
+            guard let barrier, try barrier.profileID == profileID else {
+                if attempt == 0, let barrier {
+                    remote = barrier
+                    continue
+                }
+                throw SyncClipboardError.historyChangedDuringTransfer
+            }
+
+            if remote.type == .group {
+                try await FileTransfer.validateZIP(at: temporaryURL)
+            } else {
+                let fileName = remote.text
+                let expectedHash = remote.normalizedHash
+                let hash = try await Task.detached {
+                    try Hashing.fileProfileHash(fileName: fileName, fileURL: temporaryURL)
+                }.value
+                guard hash == expectedHash else {
+                    throw SyncClipboardError.historyDownloadHashMismatch
+                }
+            }
+
+            let name = try downloadedName(for: remote, suggestedName: downloaded.suggestedName)
+            if remote.type == .image {
+                let data = try await Task.detached { try Data(contentsOf: temporaryURL) }.value
+                guard httpClient.configuration == configuration else {
+                    throw SyncClipboardError.serverConfigurationChanged
+                }
+                let snapshot = try ClipboardSnapshot.fromRemote(
+                    dto: ProfileDTO(
+                        type: .image,
+                        hash: remote.normalizedHash,
+                        text: remote.text,
+                        hasData: true,
+                        dataName: name,
+                        size: remote.size
+                    ),
+                    transferData: data
+                )
+                try clipboardService.write(snapshot)
+                imageProvenance = ImageProvenance(
+                    serverIdentity: identity,
+                    profileID: profileID,
+                    changeCount: clipboardService.changeCount
+                )
+                completeManualTransfer(push: false, message: name)
+            } else {
+                let destination = try await FileTransfer.saveDownloadedFile(
+                    temporaryURL,
+                    suggestedName: name,
+                    downloadsDirectory: downloadsDirectory
+                )
+                guard httpClient.configuration == configuration else {
+                    try? FileManager.default.removeItem(at: destination)
+                    throw SyncClipboardError.serverConfigurationChanged
+                }
+                fileDownloadReceipt = FileDownloadReceipt(
+                    serverIdentity: identity,
+                    profileID: profileID,
+                    destination: destination
+                )
+                completeManualTransfer(push: false, message: destination.path)
+            }
+            return true
+        }
+
+        throw SyncClipboardError.historyChangedDuringTransfer
+    }
+
+    private func downloadedName(for record: HistoryRecordDTO, suggestedName: String?) throws -> String {
+        if record.type == .group {
+            guard let suggestedName, !suggestedName.isEmpty, suggestedName != "data" else {
+                return "SyncClipboard-Group.zip"
+            }
+            let safeName = try FileTransfer.safeFileName(suggestedName)
+            return safeName.lowercased().hasSuffix(".zip") ? safeName : "\(safeName).zip"
+        }
+        if let suggestedName, !suggestedName.isEmpty, suggestedName != "data" {
+            return try FileTransfer.safeFileName(suggestedName)
+        }
+        return try FileTransfer.safeFileName(record.text)
+    }
+
+    private func serverIdentity(_ configuration: ServerConfiguration) -> String {
+        "\(configuration.baseURL.absoluteString)|\(configuration.username)"
     }
 
     private func completeManualTransfer(push: Bool, message: String) {

@@ -127,7 +127,132 @@ public final class SyncClipboardHTTPClient {
             auth: ServerAuth(username: configuration.username, password: configuration.password)
         )
         return try await LimitedFileDownloader(maximumBytes: maximumBytes)
-            .download(request: request, configuration: session.configuration)
+            .download(request: request, configuration: session.configuration).url
+    }
+
+    public func fetchServerTime(configuration: ServerConfiguration) async throws -> Date {
+        let request = Self.makeRequest(
+            baseURL: configuration.baseURL,
+            path: "api/time",
+            method: "GET",
+            auth: Self.auth(for: configuration)
+        )
+        let (data, _) = try await perform(request)
+        let value = try JSONDecoder().decode(String.self, from: data)
+        return try HistoryDateCodec.date(from: value)
+    }
+
+    public func fetchHistoryRecord(
+        profileID: String,
+        configuration: ServerConfiguration
+    ) async throws -> HistoryRecordDTO? {
+        let request = Self.makeRequest(
+            baseURL: configuration.baseURL,
+            path: "api/history/\(Self.encodedPathComponent(profileID))",
+            method: "GET",
+            auth: Self.auth(for: configuration)
+        )
+        let (data, response) = try await session.data(for: request)
+        guard let response = response as? HTTPURLResponse else {
+            throw SyncClipboardError.unexpectedResponse(-1)
+        }
+        if response.statusCode == 404 {
+            return nil
+        }
+        try Self.validate(response)
+        return try JSONDecoder().decode(HistoryRecordDTO.self, from: data)
+    }
+
+    public func fetchHistoryPage(
+        page: Int,
+        configuration: ServerConfiguration
+    ) async throws -> [HistoryRecordDTO] {
+        var components = URLComponents()
+        components.queryItems = [
+            URLQueryItem(name: "Page", value: String(max(1, page))),
+            URLQueryItem(name: "Types", value: "File, Image, Group"),
+            URLQueryItem(name: "SortByLastAccessed", value: "true"),
+        ]
+        let body = Data((components.percentEncodedQuery ?? "").utf8)
+        let request = Self.makeRequest(
+            baseURL: configuration.baseURL,
+            path: "api/history/query",
+            method: "POST",
+            auth: Self.auth(for: configuration),
+            body: body,
+            contentType: "application/x-www-form-urlencoded"
+        )
+        let (data, response) = try await session.data(for: request)
+        guard let response = response as? HTTPURLResponse else {
+            throw SyncClipboardError.unexpectedResponse(-1)
+        }
+        if response.statusCode == 404 {
+            throw SyncClipboardError.historyUnavailable
+        }
+        try Self.validate(response)
+        return try JSONDecoder().decode([HistoryRecordDTO].self, from: data)
+    }
+
+    public func uploadHistory(
+        _ record: HistoryRecordDTO,
+        dataFileURL: URL,
+        fileName: String,
+        configuration: ServerConfiguration
+    ) async throws -> HistoryRecordDTO {
+        _ = try record.profileID
+        let multipart = try await Task.detached {
+            try HistoryMultipartBody.create(
+                record: record,
+                dataFileURL: dataFileURL,
+                fileName: fileName
+            )
+        }.value
+        defer { multipart.cleanup() }
+
+        let request = Self.makeRequest(
+            baseURL: configuration.baseURL,
+            path: "api/history",
+            method: "POST",
+            auth: Self.auth(for: configuration),
+            contentType: "multipart/form-data; boundary=\(multipart.boundary)"
+        )
+        let (data, response) = try await session.upload(for: request, fromFile: multipart.url)
+        guard let response = response as? HTTPURLResponse else {
+            throw SyncClipboardError.unexpectedResponse(-1)
+        }
+        guard (200 ... 299).contains(response.statusCode) else {
+            if response.statusCode == 404 {
+                throw SyncClipboardError.historyUnavailable
+            }
+            let message = String(decoding: data, as: UTF8.self).lowercased()
+            if response.statusCode == 500, message.contains("hash mismatch") {
+                throw SyncClipboardError.historyHashMismatch
+            }
+            throw SyncClipboardError.historyUploadFailed(response.statusCode)
+        }
+
+        let serverRecord = try JSONDecoder().decode(HistoryRecordDTO.self, from: data)
+        guard try serverRecord.profileID == record.profileID else {
+            throw SyncClipboardError.invalidHistoryProfile
+        }
+        return serverRecord
+    }
+
+    public func downloadHistoryData(
+        profileID: String,
+        maximumBytes: Int64,
+        configuration: ServerConfiguration
+    ) async throws -> DownloadedTransfer {
+        let request = Self.makeRequest(
+            baseURL: configuration.baseURL,
+            path: "api/history/\(Self.encodedPathComponent(profileID))/data",
+            method: "GET",
+            auth: Self.auth(for: configuration)
+        )
+        return try await LimitedFileDownloader(
+            maximumBytes: maximumBytes,
+            notFoundError: .historyDataMissing(profileID)
+        ).download(request: request, configuration: session.configuration)
     }
 
     public static func makeRequest(
@@ -185,20 +310,100 @@ public final class SyncClipboardHTTPClient {
         }
         return configuration
     }
+
+    private static func auth(for configuration: ServerConfiguration) -> ServerAuth {
+        ServerAuth(username: configuration.username, password: configuration.password)
+    }
+
+    private static func encodedPathComponent(_ value: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+}
+
+struct HistoryMultipartBody {
+    static let metadataFieldNames = [
+        "hash", "type", "createTime", "lastModified", "lastAccessed",
+        "starred", "pinned", "version", "isDeleted", "text", "size",
+    ]
+
+    let url: URL
+    let boundary: String
+
+    static func create(record: HistoryRecordDTO, dataFileURL: URL, fileName: String) throws -> Self {
+        let boundary = "SyncClipboard-\(UUID().uuidString)"
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SyncClipboard-Multipart-\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            let fields = [
+                ("hash", record.normalizedHash),
+                ("type", record.type.rawValue),
+                ("createTime", HistoryDateCodec.string(from: record.createTime)),
+                ("lastModified", HistoryDateCodec.string(from: record.lastModified)),
+                ("lastAccessed", HistoryDateCodec.string(from: record.lastAccessed)),
+                ("starred", String(record.starred)),
+                ("pinned", String(record.pinned)),
+                ("version", String(record.version)),
+                ("isDeleted", String(record.isDeleted)),
+                ("text", record.text),
+                ("size", String(record.size)),
+            ]
+
+            for (name, value) in fields {
+                try handle.write(contentsOf: Data(
+                    "--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".utf8
+                ))
+            }
+
+            let safeName = fileName
+                .replacingOccurrences(of: "\\", with: "_")
+                .replacingOccurrences(of: "\"", with: "_")
+                .replacingOccurrences(of: "\r", with: "_")
+                .replacingOccurrences(of: "\n", with: "_")
+            try handle.write(contentsOf: Data(
+                "--\(boundary)\r\nContent-Disposition: form-data; name=\"data\"; filename=\"\(safeName)\"\r\nContent-Type: application/octet-stream\r\n\r\n".utf8
+            ))
+
+            let source = try FileHandle(forReadingFrom: dataFileURL)
+            defer { try? source.close() }
+            while let data = try source.read(upToCount: 64 * 1_024), !data.isEmpty {
+                try handle.write(contentsOf: data)
+            }
+            try handle.write(contentsOf: Data("\r\n--\(boundary)--\r\n".utf8))
+            return Self(url: url, boundary: boundary)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+    }
+
+    func cleanup() {
+        try? FileManager.default.removeItem(at: url)
+    }
 }
 
 private final class LimitedFileDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let maximumBytes: Int64
+    private let notFoundError: SyncClipboardError?
     private let temporaryURL: URL
     private let handle: FileHandle
     private let lock = NSLock()
     private var receivedBytes: Int64 = 0
     private var failure: Error?
-    private var continuation: CheckedContinuation<URL, Error>?
+    private var continuation: CheckedContinuation<DownloadedTransfer, Error>?
     private var session: URLSession?
+    private var suggestedName: String?
 
-    init(maximumBytes: Int64) throws {
+    init(maximumBytes: Int64, notFoundError: SyncClipboardError? = nil) throws {
         self.maximumBytes = maximumBytes
+        self.notFoundError = notFoundError
         self.temporaryURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("SyncClipboard-\(UUID().uuidString)")
         guard FileManager.default.createFile(atPath: temporaryURL.path, contents: nil) else {
@@ -212,7 +417,7 @@ private final class LimitedFileDownloader: NSObject, URLSessionDataDelegate, @un
         }
     }
 
-    func download(request: URLRequest, configuration: URLSessionConfiguration) async throws -> URL {
+    func download(request: URLRequest, configuration: URLSessionConfiguration) async throws -> DownloadedTransfer {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 guard !Task.isCancelled else {
@@ -251,15 +456,18 @@ private final class LimitedFileDownloader: NSObject, URLSessionDataDelegate, @un
             return
         }
         guard (200 ... 299).contains(response.statusCode) else {
-            failure = SyncClipboardError.unexpectedResponse(response.statusCode)
+            failure = response.statusCode == 404
+                ? notFoundError ?? SyncClipboardError.unexpectedResponse(404)
+                : SyncClipboardError.unexpectedResponse(response.statusCode)
             completionHandler(.cancel)
             return
         }
-        guard response.expectedContentLength <= maximumBytes else {
+        guard response.expectedContentLength < 0 || response.expectedContentLength <= maximumBytes else {
             failure = SyncClipboardError.transferTooLarge(maximumBytes)
             completionHandler(.cancel)
             return
         }
+        suggestedName = response.suggestedFilename
         completionHandler(.allow)
     }
 
@@ -292,7 +500,7 @@ private final class LimitedFileDownloader: NSObject, URLSessionDataDelegate, @un
         if result != nil {
             try? FileManager.default.removeItem(at: temporaryURL)
         }
-        let continuation = lock.withLock { () -> CheckedContinuation<URL, Error>? in
+        let continuation = lock.withLock { () -> CheckedContinuation<DownloadedTransfer, Error>? in
             let continuation = self.continuation
             self.continuation = nil
             self.session = nil
@@ -302,7 +510,7 @@ private final class LimitedFileDownloader: NSObject, URLSessionDataDelegate, @un
         if let result {
             continuation?.resume(throwing: result)
         } else {
-            continuation?.resume(returning: temporaryURL)
+            continuation?.resume(returning: DownloadedTransfer(url: temporaryURL, suggestedName: suggestedName))
         }
     }
 }

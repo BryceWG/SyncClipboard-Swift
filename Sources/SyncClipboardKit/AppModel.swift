@@ -79,8 +79,8 @@ public final class AppModel: ObservableObject {
         self.realtimeClient = realtimeClient ?? RealtimeClientFactory.make(httpClient: httpClient)
         self.coordinator = SyncCoordinator(httpClient: httpClient, notifier: notifier)
 
-        self.clipboardMonitor.onChange = { [weak self] in
-            self?.handleLocalClipboardChange()
+        self.clipboardMonitor.onChange = { [weak self] changeCount, observedAt in
+            self?.handleLocalClipboardChange(changeCount: changeCount, observedAt: observedAt)
         }
 
         self.realtimeClient.onProfileChanged = { [weak self] profile in
@@ -344,9 +344,13 @@ public final class AppModel: ObservableObject {
         )
     }
 
-    private func handleLocalClipboardChange() {
+    private func handleLocalClipboardChange(changeCount: Int, observedAt: Date) {
         Task { @MainActor in
-            await coordinator.handleLocalPasteboardChange(using: clipboardService)
+            await coordinator.handleLocalPasteboardChange(
+                using: clipboardService,
+                changeCount: changeCount,
+                observedAt: observedAt
+            )
         }
     }
 

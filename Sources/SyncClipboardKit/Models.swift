@@ -227,6 +227,142 @@ public struct ProfileDTO: Codable, Equatable, Sendable {
     }
 }
 
+public enum HistoryDateCodec {
+    private static let format = Date.ISO8601FormatStyle(
+        includingFractionalSeconds: true,
+        timeZone: TimeZone(secondsFromGMT: 0)!
+    )
+
+    public static func string(from date: Date) -> String {
+        date.formatted(format)
+    }
+
+    public static func date(from string: String) throws -> Date {
+        do {
+            return try format.parse(string)
+        } catch {
+            throw SyncClipboardError.invalidHistoryDate(string)
+        }
+    }
+}
+
+public struct HistoryRecordDTO: Codable, Equatable, Sendable {
+    public var hash: String
+    public var text: String
+    public var type: ProfileType
+    public var createTime: Date
+    public var lastModified: Date
+    public var lastAccessed: Date
+    public var starred: Bool
+    public var pinned: Bool
+    public var size: Int64
+    public var hasData: Bool
+    public var version: Int
+    public var isDeleted: Bool
+
+    public init(
+        hash: String,
+        text: String,
+        type: ProfileType,
+        createTime: Date,
+        lastModified: Date,
+        lastAccessed: Date,
+        starred: Bool = false,
+        pinned: Bool = false,
+        size: Int64,
+        hasData: Bool,
+        version: Int = 0,
+        isDeleted: Bool = false
+    ) {
+        self.hash = hash.uppercased()
+        self.text = text
+        self.type = type
+        self.createTime = createTime
+        self.lastModified = lastModified
+        self.lastAccessed = lastAccessed
+        self.starred = starred
+        self.pinned = pinned
+        self.size = size
+        self.hasData = hasData
+        self.version = version
+        self.isDeleted = isDeleted
+    }
+
+    public var normalizedHash: String {
+        hash.uppercased()
+    }
+
+    public var profileID: String {
+        get throws {
+            guard type == .image || type == .file || type == .group,
+                  normalizedHash.count == 64,
+                  normalizedHash.unicodeScalars.allSatisfy({
+                      (48 ... 57).contains($0.value) || (65 ... 70).contains($0.value)
+                  }) else {
+                throw SyncClipboardError.invalidHistoryProfile
+            }
+            return "\(type.rawValue)-\(normalizedHash)"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case hash
+        case text
+        case type
+        case createTime
+        case lastModified
+        case lastAccessed
+        case starred
+        case pinned
+        case size
+        case hasData
+        case version
+        case isDeleted
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        hash = try container.decode(String.self, forKey: .hash).uppercased()
+        text = try container.decode(String.self, forKey: .text)
+        type = try container.decode(ProfileType.self, forKey: .type)
+        createTime = try HistoryDateCodec.date(from: container.decode(String.self, forKey: .createTime))
+        lastModified = try HistoryDateCodec.date(from: container.decode(String.self, forKey: .lastModified))
+        lastAccessed = try HistoryDateCodec.date(from: container.decode(String.self, forKey: .lastAccessed))
+        starred = try container.decode(Bool.self, forKey: .starred)
+        pinned = try container.decode(Bool.self, forKey: .pinned)
+        size = try container.decode(Int64.self, forKey: .size)
+        hasData = try container.decode(Bool.self, forKey: .hasData)
+        version = try container.decode(Int.self, forKey: .version)
+        isDeleted = try container.decode(Bool.self, forKey: .isDeleted)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(normalizedHash, forKey: .hash)
+        try container.encode(text, forKey: .text)
+        try container.encode(type, forKey: .type)
+        try container.encode(HistoryDateCodec.string(from: createTime), forKey: .createTime)
+        try container.encode(HistoryDateCodec.string(from: lastModified), forKey: .lastModified)
+        try container.encode(HistoryDateCodec.string(from: lastAccessed), forKey: .lastAccessed)
+        try container.encode(starred, forKey: .starred)
+        try container.encode(pinned, forKey: .pinned)
+        try container.encode(size, forKey: .size)
+        try container.encode(hasData, forKey: .hasData)
+        try container.encode(version, forKey: .version)
+        try container.encode(isDeleted, forKey: .isDeleted)
+    }
+}
+
+public struct DownloadedTransfer: Sendable {
+    public let url: URL
+    public let suggestedName: String?
+
+    public init(url: URL, suggestedName: String?) {
+        self.url = url
+        self.suggestedName = suggestedName
+    }
+}
+
 public enum ClipboardPayload: Equatable, Sendable {
     case text(String)
     case image(Data)
@@ -241,6 +377,16 @@ public enum SyncClipboardError: LocalizedError, Sendable {
     case transferTooLarge(Int64)
     case unsupportedFileSelection
     case invalidRemoteFileName
+    case invalidHistoryDate(String)
+    case invalidHistoryProfile
+    case historyUnavailable
+    case historyDataMissing(String)
+    case historyHashMismatch
+    case historyDownloadHashMismatch
+    case historyArchiveInvalid
+    case historyUploadFailed(Int)
+    case historyChangedDuringTransfer
+    case serverConfigurationChanged
     case archiveFailed(String)
     case unexpectedResponse(Int)
 
@@ -262,6 +408,26 @@ public enum SyncClipboardError: LocalizedError, Sendable {
             return "The clipboard does not contain readable regular files or folders."
         case .invalidRemoteFileName:
             return "The server returned an invalid file name."
+        case .invalidHistoryDate:
+            return "The server returned an invalid history timestamp."
+        case .invalidHistoryProfile:
+            return "The server returned an invalid history profile identifier."
+        case .historyUnavailable:
+            return "The server does not support clipboard history. SyncClipboard Server 3.1.1 or later is required."
+        case .historyDataMissing(let profileID):
+            return "History data is missing for \(profileID). Delete that broken server history record before uploading it again."
+        case .historyHashMismatch:
+            return "The server rejected the upload because its data hash did not match."
+        case .historyDownloadHashMismatch:
+            return "The downloaded file did not match its history hash."
+        case .historyArchiveInvalid:
+            return "The downloaded group is not a valid ZIP archive."
+        case .historyUploadFailed(let statusCode):
+            return "History upload failed with HTTP status code \(statusCode)."
+        case .historyChangedDuringTransfer:
+            return "The remote file changed repeatedly during download. Try again."
+        case .serverConfigurationChanged:
+            return "Server settings changed during file synchronization. Try again."
         case .archiveFailed(let message):
             return "Could not create ZIP archive: \(message)"
         case .unexpectedResponse(let statusCode):

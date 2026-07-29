@@ -22,18 +22,18 @@ Keep:
 - server URL / username / password configuration
 - connection test
 - realtime clipboard sync against the official SyncClipboard server
-- text sync
-- basic image sync through PNG payloads
+- automatic text sync
+- manual image / file sync through the server history API
+  (`Sync Images/Files` menu action and its configurable global shortcut)
 - simple menu bar status UI
 
 Deliberately excluded unless the user asks for them:
 
-- clipboard history
-- file sync as a user feature
+- clipboard history UI / local history database
+  (the history API is only a transport for manual binary sync)
 - WebDAV / S3 / third-party account types
 - built-in server features
 - updater / release feed logic
-- hotkeys
 - image compatibility enhancement chains
 - broad settings surface copied from the legacy app
 
@@ -101,10 +101,13 @@ Important:
 ### Core Layer
 
 - `AppModel` is the central state container used by the UI
-- `SyncCoordinator` owns upload / download decisions
-- `ClipboardService` reads and writes the macOS pasteboard
+- `SyncCoordinator` owns upload / download decisions: automatic text sync plus
+  the history-driven manual image/file transfer
+- `ClipboardService` reads and writes the macOS pasteboard; `ClipboardMonitor`
+  polls `changeCount` and records observation times for manual-sync event dating
 - `SyncSnapshotTracker` suppresses immediate upload/download echo loops
 - `SyncClipboardHTTPClient` handles REST endpoints
+  (current profile, file payloads, history API)
 - `SignalRRealtimeClient` handles realtime server notifications
 
 ## Server Compatibility Contract
@@ -116,8 +119,23 @@ The Swift client currently assumes the official self-hosted server surface:
 - `PUT /SyncClipboard.json`
 - `GET /file/{dataName}`
 - `PUT /file/{dataName}`
+- `GET /api/history/{profileId}`
+- `POST /api/history/query` (form-encoded fields; fixed page size 50)
+- `POST /api/history` (multipart; metadata fields first, `data` part last)
+- `GET /api/history/{profileId}/data`
 - `POST /SyncClipboardHub/negotiate?negotiateVersion=1`
 - `WS/SSE/LongPolling /SyncClipboardHub`
+
+History details:
+
+- requires SyncClipboard Server 3.1.1+; used only by manual image/file sync
+- profile IDs are `{Type}-{UPPERCASE_SHA256}`; the File/Image hash is
+  `sha256(fileName + "|" + contentSHA256)`
+- multi-file selections are zipped and uploaded as `File` records (not `Group`)
+- the client does not subscribe to `RemoteHistoryChanged`; it re-queries the
+  server on every manual action
+- automatic text sync never calls the history API; manual binary sync never
+  writes `/SyncClipboard.json`
 
 SignalR details:
 
@@ -151,6 +169,8 @@ These are known non-blocking gaps at the current stage:
 - no release signing / notarization workflow
 - no end-to-end automated test against a live SyncClipboard server
 - UI still contains a couple of convenience toggles that are not strictly part of the minimum requested scope
+- the manual-sync image provenance and file-download receipt are in-memory only;
+  a restart may re-download or re-check the same remote record
 
 ## Recent Behavioral Notes
 
@@ -158,3 +178,10 @@ These are known non-blocking gaps at the current stage:
   - attempt local upload first
   - then force a remote refresh
 - manual sync should not rely only on the last realtime fingerprint, otherwise it can miss a needed re-apply of unchanged remote content
+- `Sync Images/Files` is fully driven by the server history API:
+  - register the local binary in history first (event times corrected by the
+    server clock), then let the server's latest non-text record win
+  - download with a post-download head re-check and at most one retry;
+    configuration changes mid-task discard the result
+  - an active (non-deleted) history record without data aborts manual sync
+    instead of being skipped; the user must delete the broken record server-side
