@@ -226,6 +226,7 @@ public final class SyncCoordinator {
 
             let remoteID = try remote.profileID
             if remoteID == local?.profileID {
+                try await publishCurrentProfile(remote, configuration: configuration)
                 if uploaded, case .upload(let candidate) = local {
                     completeManualTransfer(push: true, message: candidate.prepared.name)
                 } else {
@@ -471,6 +472,36 @@ public final class SyncCoordinator {
         }
 
         throw SyncClipboardError.historyChangedDuringTransfer
+    }
+
+    private func publishCurrentProfile(
+        _ record: HistoryRecordDTO,
+        configuration: ServerConfiguration
+    ) async throws {
+        guard httpClient.configuration == configuration else {
+            throw SyncClipboardError.serverConfigurationChanged
+        }
+        let current = try await httpClient.fetchCurrentProfile(configuration: configuration)
+        guard httpClient.configuration == configuration else {
+            throw SyncClipboardError.serverConfigurationChanged
+        }
+        guard current.type != record.type || current.hash.uppercased() != record.normalizedHash else {
+            return
+        }
+        try await httpClient.setCurrentProfile(
+            ProfileDTO(
+                type: record.type,
+                hash: record.normalizedHash,
+                text: record.text,
+                hasData: record.hasData,
+                dataName: record.hasData ? record.text : nil,
+                size: record.size
+            ),
+            configuration: configuration
+        )
+        guard httpClient.configuration == configuration else {
+            throw SyncClipboardError.serverConfigurationChanged
+        }
     }
 
     private func downloadedName(for record: HistoryRecordDTO, suggestedName: String?) throws -> String {

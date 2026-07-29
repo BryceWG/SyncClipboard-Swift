@@ -52,6 +52,12 @@ public final class SyncClipboardHTTPClient {
 
     public func fetchCurrentProfile() async throws -> ProfileDTO {
         let configuration = try requireConfiguration()
+        return try await fetchCurrentProfile(configuration: configuration)
+    }
+
+    public func fetchCurrentProfile(
+        configuration: ServerConfiguration
+    ) async throws -> ProfileDTO {
         let request = Self.makeRequest(
             baseURL: configuration.baseURL,
             path: "SyncClipboard.json",
@@ -64,6 +70,13 @@ public final class SyncClipboardHTTPClient {
 
     public func setCurrentProfile(_ profile: ProfileDTO) async throws {
         let configuration = try requireConfiguration()
+        try await setCurrentProfile(profile, configuration: configuration)
+    }
+
+    public func setCurrentProfile(
+        _ profile: ProfileDTO,
+        configuration: ServerConfiguration
+    ) async throws {
         let body = try JSONEncoder().encode(profile)
         let request = Self.makeRequest(
             baseURL: configuration.baseURL,

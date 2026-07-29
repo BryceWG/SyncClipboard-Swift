@@ -957,6 +957,16 @@ final class SyncClipboardTests: XCTestCase {
                     HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
                     try JSONEncoder().encode([history])
                 )
+            case ("GET", "/sync/SyncClipboard.json"):
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    try JSONEncoder().encode(ProfileDTO(type: .text, hash: "text", text: "text"))
+                )
+            case ("PUT", "/sync/SyncClipboard.json"):
+                let profile = try JSONDecoder().decode(ProfileDTO.self, from: requestBody(request))
+                XCTAssertEqual(profile.type, .image)
+                XCTAssertEqual(profile.hash, history.normalizedHash)
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data())
             default:
                 XCTFail("Unexpected request: \(request.httpMethod ?? "GET") \(url.path)")
                 return (HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!, Data())
@@ -970,6 +980,8 @@ final class SyncClipboardTests: XCTestCase {
             "GET /sync/api/time",
             "POST /sync/api/history",
             "POST /sync/api/history/query",
+            "GET /sync/SyncClipboard.json",
+            "PUT /sync/SyncClipboard.json",
         ])
 
         log.clear()
@@ -986,6 +998,7 @@ final class SyncClipboardTests: XCTestCase {
         XCTAssertEqual(log.snapshot, [
             "GET /sync/api/history/\(profileID)",
             "POST /sync/api/history/query",
+            "GET /sync/SyncClipboard.json",
         ])
     }
 
@@ -1185,6 +1198,13 @@ final class SyncClipboardTests: XCTestCase {
                     HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
                     try JSONEncoder().encode([restoredRecord])
                 )
+            case ("GET", "/sync/SyncClipboard.json"):
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    try JSONEncoder().encode(ProfileDTO(type: .text, hash: "text", text: "text"))
+                )
+            case ("PUT", "/sync/SyncClipboard.json"):
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data())
             default:
                 XCTFail("Unexpected request: \(request.httpMethod ?? "GET") \(url.path)")
                 return (HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!, Data())
@@ -1198,6 +1218,8 @@ final class SyncClipboardTests: XCTestCase {
             "GET /sync/api/time",
             "POST /sync/api/history",
             "POST /sync/api/history/query",
+            "GET /sync/SyncClipboard.json",
+            "PUT /sync/SyncClipboard.json",
         ])
     }
 
@@ -1331,6 +1353,15 @@ final class SyncClipboardTests: XCTestCase {
                     try JSONEncoder().encode([remote])
                 )
             }
+            if request.httpMethod == "GET", url.path.hasSuffix("/SyncClipboard.json") {
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    try JSONEncoder().encode(ProfileDTO(type: .image, hash: remote.normalizedHash, text: remote.text))
+                )
+            }
+            if request.httpMethod == "PUT" {
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data())
+            }
             XCTAssertEqual(url.path, "/sync/api/history/\(profileID)/data")
             return (
                 HTTPURLResponse(
@@ -1350,7 +1381,7 @@ final class SyncClipboardTests: XCTestCase {
 
         let second = await coordinator.transferClipboardFiles(using: clipboardService, maximumBytes: 1_024)
         XCTAssertTrue(second)
-        XCTAssertEqual(log.snapshot, ["POST /sync/api/history/query"])
+        XCTAssertEqual(log.snapshot, ["POST /sync/api/history/query", "GET /sync/SyncClipboard.json"])
     }
 
     @MainActor
@@ -1756,6 +1787,13 @@ final class SyncClipboardTests: XCTestCase {
                     HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
                     try JSONEncoder().encode([history])
                 )
+            case ("GET", "/sync/SyncClipboard.json"):
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    try JSONEncoder().encode(ProfileDTO(type: .text, hash: "text", text: "text"))
+                )
+            case ("PUT", "/sync/SyncClipboard.json"):
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data())
             default:
                 XCTFail("Unexpected request: \(request.httpMethod ?? "GET") \(url.path)")
                 return (HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!, Data())
