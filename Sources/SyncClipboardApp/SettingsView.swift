@@ -10,13 +10,32 @@ private enum ActionState: Equatable {
 
     var isRunning: Bool { self == .running }
 
-    func title(idle: String, running: String, succeeded: String, failed: String) -> String {
+    var tint: Color? {
         switch self {
-        case .idle: idle
-        case .running: running
-        case .succeeded: succeeded
-        case .failed: failed
+        case .succeeded: .green
+        case .failed: .red
+        default: nil
         }
+    }
+
+    /// How long a finished state stays on screen before reverting to idle.
+    var revertDelay: Duration? {
+        switch self {
+        case .succeeded: .seconds(2)
+        case .failed: .seconds(3)
+        default: nil
+        }
+    }
+
+    func title(idle: String, running: String, succeeded: String, failed: String) -> String {
+        let raw: String
+        switch self {
+        case .idle: raw = idle
+        case .running: raw = running
+        case .succeeded: raw = succeeded
+        case .failed: raw = failed
+        }
+        return L10n.tr(raw)
     }
 }
 
@@ -33,7 +52,6 @@ struct SettingsView: View {
             behaviorSection
             fileTransferSection
             receiveModeSection
-            reconnectSection
         }
         .formStyle(.grouped)
         .frame(minWidth: 460, idealWidth: 520)
@@ -42,28 +60,23 @@ struct SettingsView: View {
     private var statusSection: some View {
         Section("Status") {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 10, height: 10)
-                    .animation(.snappy(duration: 0.25), value: statusColor)
-                Text(appModel.connectionStatusText)
-                    .font(.headline)
+                HStack(spacing: 6) {
+                    Image(systemName: statusSymbol)
+                        .symbolReplaceTransition()
+                    Text(localizedStatusText)
+                        .fontWeight(.semibold)
+                }
+                .font(.headline)
+                .foregroundStyle(statusColor)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(statusColor.opacity(0.12), in: Capsule())
+                .animation(.snappy(duration: 0.25), value: appModel.connectionStatusText)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Connection status: \(localizedStatusText)")
+
                 Spacer()
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Connection status: \(appModel.connectionStatusText)")
 
-            activityRow("Last Push", date: appModel.lastPushAt)
-            activityRow("Last Pull", date: appModel.lastPullAt)
-
-            if !appModel.lastErrorText.isEmpty {
-                Text(appModel.lastErrorText)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-            }
-
-            HStack(spacing: 8) {
                 Button {
                     Task {
                         isSyncing = true
@@ -75,11 +88,30 @@ struct SettingsView: View {
                         if isSyncing {
                             ProgressView()
                                 .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
                         }
                         Text(isSyncing ? "Syncing…" : "Sync Now")
                     }
                 }
+                .animation(.snappy(duration: 0.2), value: isSyncing)
                 .disabled(!appModel.syncEnabled || appModel.requiresSetup || isSyncing)
+            }
+
+            activityRow("Last Push", date: appModel.lastPushAt)
+            activityRow("Last Pull", date: appModel.lastPullAt)
+
+            if !appModel.lastErrorText.isEmpty {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(appModel.lastErrorText)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .font(.callout)
+                .foregroundStyle(.red)
+                .padding(8)
+                .background(Color.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
             }
         }
     }
@@ -89,8 +121,10 @@ struct SettingsView: View {
             TextField("Server URL", text: $appModel.serverURL, prompt: Text("https://your-server.example"))
                 .disabled(serverActionInProgress)
             TextField("Username", text: $appModel.username, prompt: Text("Account name"))
+                .textContentType(.username)
                 .disabled(serverActionInProgress)
             SecureField("Password", text: $appModel.password, prompt: Text("Password"))
+                .textContentType(.password)
                 .disabled(serverActionInProgress)
 
             HStack(spacing: 8) {
@@ -98,16 +132,21 @@ struct SettingsView: View {
                     Task {
                         connectionTestState = .running
                         connectionTestState = await appModel.testConnection() ? .succeeded : .failed
+                        if let delay = connectionTestState.revertDelay {
+                            try? await Task.sleep(for: delay)
+                            connectionTestState = .idle
+                        }
                     }
                 } label: {
                     HStack(spacing: 6) {
                         if connectionTestState.isRunning {
                             ProgressView()
                                 .controlSize(.small)
-                        } else if connectionTestState == .succeeded {
-                            Image(systemName: "checkmark")
-                        } else if connectionTestState == .failed {
-                            Image(systemName: "xmark")
+                        } else {
+                            Image(systemName: connectionTestState == .succeeded
+                                  ? "checkmark"
+                                  : connectionTestState == .failed ? "xmark" : "network")
+                                .symbolReplaceTransition()
                         }
                         Text(connectionTestState.title(
                             idle: "Test Connection",
@@ -116,7 +155,9 @@ struct SettingsView: View {
                             failed: "Test Failed"
                         ))
                     }
+                    .foregroundStyle(connectionTestState.tint ?? .primary)
                 }
+                .animation(.snappy(duration: 0.2), value: connectionTestState)
                 .disabled(serverActionInProgress)
 
                 Spacer()
@@ -125,6 +166,10 @@ struct SettingsView: View {
                     Task {
                         saveState = .running
                         saveState = await appModel.persistSettings() ? .succeeded : .failed
+                        if let delay = saveState.revertDelay {
+                            try? await Task.sleep(for: delay)
+                            saveState = .idle
+                        }
                     }
                 } label: {
                     HStack(spacing: 6) {
@@ -133,8 +178,10 @@ struct SettingsView: View {
                                 .controlSize(.small)
                         } else if saveState == .succeeded {
                             Image(systemName: "checkmark")
+                                .symbolReplaceTransition()
                         } else if saveState == .failed {
                             Image(systemName: "xmark")
+                                .symbolReplaceTransition()
                         }
                         Text(saveState.title(
                             idle: "Save Changes",
@@ -146,6 +193,8 @@ struct SettingsView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
+                .tint(saveState.tint ?? .accentColor)
+                .animation(.snappy(duration: 0.2), value: saveState)
                 .disabled(serverActionInProgress)
             }
         }
@@ -177,7 +226,7 @@ struct SettingsView: View {
     }
 
     private var receiveModeSection: some View {
-        Section {
+        Section("Receive") {
             Picker("Receive Mode", selection: $appModel.receiveMode) {
                 ForEach(RemoteReceiveMode.allCases) { mode in
                     Text(mode.displayName).tag(mode)
@@ -194,31 +243,31 @@ struct SettingsView: View {
                         Spacer()
                         Text(Self.pollingIntervalText(for: appModel.pollingIntervalSeconds))
                             .foregroundStyle(.secondary)
+                            .monospacedDigit()
                     }
                 }
                 .onChange(of: appModel.pollingIntervalSeconds) { _ in
                     Task { await appModel.persistSettings() }
                 }
             }
-        } header: {
-            Text("Receive")
-        } footer: {
-            if appModel.receiveMode == .polling {
-                Text("\(appModel.receiveMode.detailText) The client fetches the latest clipboard from the server at this interval.")
-            } else {
-                Text(appModel.receiveMode.detailText)
-            }
+
+            Toggle(appModel.receiveMode == .realtime ? "Auto Reconnect" : "Auto Retry", isOn: $appModel.autoReconnect)
+                .onChange(of: appModel.autoReconnect) { _ in
+                    Task { await appModel.persistSettings() }
+                }
         }
         .animation(.snappy(duration: 0.25), value: appModel.receiveMode)
     }
 
     private var fileTransferSection: some View {
         Section {
-            LabeledContent("Global Shortcut") {
+            HStack {
+                Text("Global Shortcut")
+                Spacer()
                 ShortcutRecorder(shortcut: appModel.transferShortcut) { shortcut in
                     Task { await appModel.updateTransferShortcut(shortcut) }
                 }
-                .frame(width: 150, height: 26)
+                .frame(width: 150, height: 22)
             }
 
             TextField("Maximum Transfer Size (MiB)", value: $appModel.maximumTransferSizeMiB, format: .number)
@@ -240,16 +289,20 @@ struct SettingsView: View {
         }
     }
 
-    private var reconnectSection: some View {
-        Section {
-            Toggle(appModel.receiveMode == .realtime ? "Auto Reconnect" : "Auto Retry", isOn: $appModel.autoReconnect)
-                .onChange(of: appModel.autoReconnect) { _ in
-                    Task { await appModel.persistSettings() }
-                }
-        } footer: {
-            Text(appModel.receiveMode == .realtime
-                 ? "Reconnect automatically after network interruptions and wake the connection back up after the Mac resumes."
-                 : "Keep retrying future polling requests after network failures and refresh again when the Mac wakes.")
+    private var localizedStatusText: String {
+        L10n.tr(appModel.connectionStatusText)
+    }
+
+    private var statusSymbol: String {
+        switch appModel.connectionStatusText {
+        case "Connected", "Polling":
+            return "checkmark.circle.fill"
+        case "Connecting", "Reconnecting":
+            return "antenna.radiowaves.left.and.right"
+        case "Error", "Missing Config":
+            return "exclamationmark.triangle.fill"
+        default:
+            return "circle.slash"
         }
     }
 
@@ -275,17 +328,31 @@ struct SettingsView: View {
         LabeledContent(title) {
             if let date {
                 Text(date, style: .relative)
+                    .monospacedDigit()
             } else {
                 Text("Never")
+                    .foregroundStyle(.secondary)
             }
         }
     }
 
     private static func pollingIntervalText(for value: Double) -> String {
         if value.rounded(.towardZero) == value {
-            return "\(Int(value)) sec"
+            return String(format: L10n.tr("%ld sec"), Int(value))
         }
 
-        return String(format: "%.1f sec", value)
+        return String(format: L10n.tr("%.1f sec"), value)
+    }
+}
+
+extension View {
+    /// Smooth symbol swap where supported; falls back to a plain swap on macOS 13.
+    @ViewBuilder
+    func symbolReplaceTransition() -> some View {
+        if #available(macOS 14, *) {
+            contentTransition(.symbolEffect(.replace))
+        } else {
+            self
+        }
     }
 }

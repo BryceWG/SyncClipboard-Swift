@@ -1,0 +1,71 @@
+/* Settings window */
+"Status" = "状态";
+"Connection status: %@" = "连接状态：%@";
+"Last Push" = "上次上传";
+"Last Pull" = "上次下载";
+"Never" = "从未";
+"Sync Now" = "立即同步";
+"Syncing…" = "同步中…";
+"Server" = "服务器";
+"Server URL" = "服务器地址";
+"Account name" = "账户名";
+"Username" = "用户名";
+"Password" = "密码";
+"Test Connection" = "测试连接";
+"Testing…" = "测试中…";
+"Connection OK" = "连接成功";
+"Test Failed" = "连接失败";
+"Save Changes" = "保存更改";
+"Saving…" = "保存中…";
+"Saved" = "已保存";
+"Save Failed" = "保存失败";
+"Behavior" = "行为";
+"Enable Sync" = "启用同步";
+"Launch at Login" = "登录时启动";
+"Show Notifications" = "显示通知";
+"Show Dock Icon" = "显示 Dock 图标";
+"Receive" = "接收";
+"Receive Mode" = "接收模式";
+"Realtime" = "实时";
+"Polling" = "轮询";
+"Polling Interval" = "轮询间隔";
+"%ld sec" = "%ld 秒";
+"%.1f sec" = "%.1f 秒";
+"Auto Reconnect" = "自动重连";
+"Auto Retry" = "自动重试";
+"Images and Files" = "图片和文件";
+"Global Shortcut" = "全局快捷键";
+"Maximum Transfer Size (MiB)" = "最大传输大小 (MiB)";
+"Images and files transfer only on request. Maximum: %lld MiB. Downloads are saved to ~/Downloads/SyncClipboard." = "图片和文件仅在手动触发时传输。最大：%lld MiB。下载保存到 ~/Downloads/SyncClipboard。";
+"Settings" = "设置";
+
+/* Connection status */
+"Connected" = "已连接";
+"Connecting" = "连接中";
+"Reconnecting" = "重连中";
+"Disconnected" = "未连接";
+"Disabled" = "已停用";
+"Error" = "错误";
+"Missing Config" = "缺少配置";
+
+/* Menu bar */
+"Status: %@" = "状态：%@";
+"Sync Images/Files" = "同步图片/文件";
+"Syncing Images/Files…" = "正在同步图片/文件…";
+"Open Settings" = "打开设置";
+"Quit" = "退出";
+
+/* Shortcut recorder */
+"Not Set" = "未设置";
+"Type Shortcut" = "按下快捷键";
+"Key %u" = "按键 %u";
+"File sync shortcut" = "文件同步快捷键";
+
+/* Notifications */
+"Clipboard Updated" = "剪贴板已更新";
+"File Sync Failed" = "文件同步失败";
+"File Uploaded" = "文件已上传";
+"File Downloaded" = "文件已下载";
+"Nothing to Transfer" = "没有可传输的内容";
+"The same image is already on the server." = "服务器上已有相同的图片。";
+"No remote image or file is available." = "服务器上没有可用的图片或文件。";

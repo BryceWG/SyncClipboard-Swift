@@ -5,13 +5,13 @@ import SyncClipboardKit
 
 enum ShortcutDisplay {
     static func string(for shortcut: GlobalShortcut?) -> String {
-        guard let shortcut else { return "Not Set" }
+        guard let shortcut else { return L10n.tr("Not Set") }
         var value = ""
         if shortcut.modifiers & GlobalShortcut.control != 0 { value += "⌃" }
         if shortcut.modifiers & GlobalShortcut.option != 0 { value += "⌥" }
         if shortcut.modifiers & GlobalShortcut.shift != 0 { value += "⇧" }
         if shortcut.modifiers & GlobalShortcut.command != 0 { value += "⌘" }
-        return value + (shortcut.displayKey ?? "Key \(shortcut.keyCode)")
+        return value + (shortcut.displayKey ?? String(format: L10n.tr("Key %u"), shortcut.keyCode))
     }
 }
 
@@ -114,13 +114,13 @@ final class ShortcutRecorderView: NSView {
         self.shortcut = shortcut
         self.onChange = onChange
         super.init(frame: .zero)
-        setAccessibilityLabel("File sync shortcut")
+        setAccessibilityLabel(L10n.tr("File sync shortcut"))
         setAccessibilityRole(.button)
     }
 
     required init?(coder: NSCoder) { nil }
     override var acceptsFirstResponder: Bool { true }
-    override var intrinsicContentSize: NSSize { NSSize(width: 150, height: 26) }
+    override var intrinsicContentSize: NSSize { NSSize(width: 150, height: 22) }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
@@ -168,7 +168,7 @@ final class ShortcutRecorderView: NSView {
         NSColor.separatorColor.setStroke()
         path.stroke()
 
-        let text = isRecording ? "Type Shortcut" : ShortcutDisplay.string(for: shortcut)
+        let text = isRecording ? L10n.tr("Type Shortcut") : ShortcutDisplay.string(for: shortcut)
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
             .foregroundColor: NSColor.labelColor,

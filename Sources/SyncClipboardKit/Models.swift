@@ -35,18 +35,9 @@ public enum RemoteReceiveMode: String, Codable, Equatable, Sendable, CaseIterabl
     public var displayName: String {
         switch self {
         case .realtime:
-            return "Realtime"
+            return NSLocalizedString("Realtime", bundle: .main, comment: "Receive mode")
         case .polling:
-            return "Polling"
-        }
-    }
-
-    public var detailText: String {
-        switch self {
-        case .realtime:
-            return "Use the server's long-lived realtime channel for immediate remote updates."
-        case .polling:
-            return "Periodically fetch the latest clipboard over HTTP instead of keeping a live connection."
+            return NSLocalizedString("Polling", bundle: .main, comment: "Receive mode")
         }
     }
 

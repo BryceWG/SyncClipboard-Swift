@@ -114,7 +114,7 @@ public final class SyncCoordinator {
             diagnosticsHandler?(diagnostics)
 
             if showNotifications {
-                notifier.notify(title: "Clipboard Updated", body: snapshot.previewText)
+                notifier.notify(title: NSLocalizedString("Clipboard Updated", bundle: .main, comment: "Notification title"), body: snapshot.previewText)
             }
             return true
         } catch {
@@ -165,7 +165,7 @@ public final class SyncCoordinator {
                 }
                 let remote = try await httpClient.fetchCurrentProfile()
                 guard remote.type != .image || remote.hash != localSnapshot.hash else {
-                    notifyManualSkip("The same image is already on the server.")
+                    notifyManualSkip(NSLocalizedString("The same image is already on the server.", bundle: .main, comment: "Manual transfer skip message"))
                     return true
                 }
                 guard let data = localSnapshot.transferData, let name = localSnapshot.dataName else {
@@ -180,7 +180,7 @@ public final class SyncCoordinator {
 
             let remote = try await httpClient.fetchCurrentProfile()
             guard remote.type == .image || remote.type == .file || remote.type == .group else {
-                notifyManualSkip("No remote image or file is available.")
+                notifyManualSkip(NSLocalizedString("No remote image or file is available.", bundle: .main, comment: "Manual transfer skip message"))
                 return true
             }
             guard remote.size <= maximumBytes else {
@@ -212,7 +212,7 @@ public final class SyncCoordinator {
             diagnostics.lastError = error.localizedDescription
             diagnosticsHandler?(diagnostics)
             if showNotifications {
-                notifier.notify(title: "File Sync Failed", body: error.localizedDescription)
+                notifier.notify(title: NSLocalizedString("File Sync Failed", bundle: .main, comment: "Notification title"), body: error.localizedDescription)
             }
             return false
         }
@@ -227,7 +227,10 @@ public final class SyncCoordinator {
         diagnostics.lastError = nil
         diagnosticsHandler?(diagnostics)
         if showNotifications {
-            notifier.notify(title: push ? "File Uploaded" : "File Downloaded", body: message)
+            let title = push
+                ? NSLocalizedString("File Uploaded", bundle: .main, comment: "Notification title")
+                : NSLocalizedString("File Downloaded", bundle: .main, comment: "Notification title")
+            notifier.notify(title: title, body: message)
         }
     }
 
@@ -235,7 +238,7 @@ public final class SyncCoordinator {
         diagnostics.lastError = nil
         diagnosticsHandler?(diagnostics)
         if showNotifications {
-            notifier.notify(title: "Nothing to Transfer", body: message)
+            notifier.notify(title: NSLocalizedString("Nothing to Transfer", bundle: .main, comment: "Notification title"), body: message)
         }
     }
 

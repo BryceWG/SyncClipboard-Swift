@@ -46,6 +46,9 @@ targets:
         buildPhase: resources
       - path: build/macos/tray
         buildPhase: resources
+      - path: Resources/zh-Hans.lproj
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: SyncClipboardKit
     settings:

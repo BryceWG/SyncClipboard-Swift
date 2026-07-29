@@ -1039,6 +1039,7 @@ final class SyncClipboardTests: XCTestCase {
         )
         XCTAssertEqual(keychainStore.savedPasswords.first?.password, "secret")
         XCTAssertEqual(settingsStore.savedSettings.first?.keychainAccount, "primary")
+        XCTAssertTrue(launchManager.requestedValues.isEmpty)
     }
 
     @MainActor
@@ -1068,6 +1069,16 @@ final class SyncClipboardTests: XCTestCase {
             AppModel.launchAtLoginIssueText(forRequestedState: true, status: .requiresApproval)
         )
         XCTAssertEqual(settingsStore.savedSettings.first?.launchAtLogin, false)
+        XCTAssertEqual(launchManager.requestedValues, [true])
+    }
+
+    func testLaunchAtLoginUpdatesOnlyForDefiniteStateChanges() {
+        XCTAssertFalse(AppModel.shouldUpdateLaunchAtLogin(requested: false, status: .disabled))
+        XCTAssertFalse(AppModel.shouldUpdateLaunchAtLogin(requested: true, status: .enabled))
+        XCTAssertFalse(AppModel.shouldUpdateLaunchAtLogin(requested: false, status: .requiresApproval))
+        XCTAssertFalse(AppModel.shouldUpdateLaunchAtLogin(requested: true, status: .requiresApproval))
+        XCTAssertTrue(AppModel.shouldUpdateLaunchAtLogin(requested: true, status: .disabled))
+        XCTAssertTrue(AppModel.shouldUpdateLaunchAtLogin(requested: false, status: .enabled))
     }
 
     @MainActor

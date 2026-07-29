@@ -122,10 +122,15 @@ public final class AppModel: ObservableObject {
         let requestedLaunchAtLogin = launchAtLogin
         var issueText: String?
 
-        do {
-            try launchAtLoginManager.setEnabled(requestedLaunchAtLogin)
-        } catch {
-            issueText = error.localizedDescription
+        if Self.shouldUpdateLaunchAtLogin(
+            requested: requestedLaunchAtLogin,
+            status: launchAtLoginManager.status
+        ) {
+            do {
+                try launchAtLoginManager.setEnabled(requestedLaunchAtLogin)
+            } catch {
+                issueText = error.localizedDescription
+            }
         }
 
         let launchStatus = launchAtLoginManager.status
@@ -269,7 +274,6 @@ public final class AppModel: ObservableObject {
             case .realtime:
                 await realtimeClient.stop()
                 await realtimeClient.start(configuration: configuration)
-                _ = await coordinator.refreshFromServer(using: clipboardService)
             case .polling:
                 updatePollingForActivity(forceRefresh: true)
             }
@@ -313,9 +317,6 @@ public final class AppModel: ObservableObject {
         case .realtime:
             stopPollingLoop()
             await realtimeClient.start(configuration: configuration)
-            if forceRefresh {
-                _ = await coordinator.refreshFromServer(using: clipboardService)
-            }
         case .polling:
             await realtimeClient.stop()
             connectionStatusText = "Polling"
@@ -481,6 +482,20 @@ public final class AppModel: ObservableObject {
 
     nonisolated static func launchAtLoginEnabled(for status: LaunchAtLoginStatus) -> Bool {
         status == .enabled
+    }
+
+    nonisolated static func shouldUpdateLaunchAtLogin(
+        requested: Bool,
+        status: LaunchAtLoginStatus
+    ) -> Bool {
+        switch status {
+        case .enabled:
+            return !requested
+        case .disabled:
+            return requested
+        case .requiresApproval:
+            return false
+        }
     }
 
     nonisolated static func launchAtLoginIssueText(

@@ -8,13 +8,14 @@ final class StatusMenuController {
     private let appModel: AppModel
     private let openSettings: () -> Void
     private var cancellables = Set<AnyCancellable>()
+    private var trayImages: [String: NSImage] = [:]
 
-    private let statusLineItem = NSMenuItem(title: "Status: Disconnected", action: nil, keyEquivalent: "")
-    private let syncToggleItem = NSMenuItem(title: "Enable Sync", action: #selector(toggleSync), keyEquivalent: "")
-    private let syncNowItem = NSMenuItem(title: "Sync Now", action: #selector(syncNow), keyEquivalent: "")
-    private let syncFilesItem = NSMenuItem(title: "Sync Images/Files", action: #selector(syncFiles), keyEquivalent: "")
-    private let settingsItem = NSMenuItem(title: "Open Settings", action: #selector(showSettings), keyEquivalent: ",")
-    private let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
+    private let statusLineItem = NSMenuItem(title: L10n.tr("Status: %@"), action: nil, keyEquivalent: "")
+    private let syncToggleItem = NSMenuItem(title: L10n.tr("Enable Sync"), action: #selector(toggleSync), keyEquivalent: "")
+    private let syncNowItem = NSMenuItem(title: L10n.tr("Sync Now"), action: #selector(syncNow), keyEquivalent: "")
+    private let syncFilesItem = NSMenuItem(title: L10n.tr("Sync Images/Files"), action: #selector(syncFiles), keyEquivalent: "")
+    private let settingsItem = NSMenuItem(title: L10n.tr("Open Settings"), action: #selector(showSettings), keyEquivalent: ",")
+    private let quitItem = NSMenuItem(title: L10n.tr("Quit"), action: #selector(quit), keyEquivalent: "q")
 
     init(appModel: AppModel, openSettings: @escaping () -> Void) {
         self.appModel = appModel
@@ -31,12 +32,6 @@ final class StatusMenuController {
         syncFilesItem.target = self
         settingsItem.target = self
         quitItem.target = self
-
-        statusLineItem.image = Self.symbolImage(named: "doc.on.clipboard")
-        syncNowItem.image = Self.symbolImage(named: "arrow.triangle.2.circlepath")
-        syncFilesItem.image = Self.symbolImage(named: "doc.on.doc")
-        settingsItem.image = Self.symbolImage(named: "gearshape")
-        quitItem.image = Self.symbolImage(named: "power")
 
         let menu = NSMenu()
         statusLineItem.isEnabled = false
@@ -83,40 +78,26 @@ final class StatusMenuController {
     }
 
     private func refreshMenu() {
-        statusLineItem.title = "Status: \(appModel.connectionStatusText)"
+        statusLineItem.title = String(format: L10n.tr("Status: %@"), L10n.tr(appModel.connectionStatusText))
         syncToggleItem.state = appModel.syncEnabled ? .on : .off
         syncNowItem.isEnabled = appModel.syncEnabled && !appModel.requiresSetup
         syncFilesItem.isEnabled = appModel.syncEnabled && !appModel.requiresSetup && !appModel.isFileTransferRunning
         let shortcut = appModel.transferShortcut.map { "   \(ShortcutDisplay.string(for: $0))" } ?? ""
-        syncFilesItem.title = (appModel.isFileTransferRunning ? "Syncing Images/Files…" : "Sync Images/Files") + shortcut
+        syncFilesItem.title = (appModel.isFileTransferRunning ? L10n.tr("Syncing Images/Files…") : L10n.tr("Sync Images/Files")) + shortcut
         updateStatusIcon()
     }
 
     private func updateStatusIcon() {
         guard let button = statusItem.button else { return }
 
-        let resourceName: String
-        let isTemplate: Bool
-
         let hasError = appModel.connectionStatusText == "Error"
             || appModel.connectionStatusText == "Missing Config"
             || !appModel.lastErrorText.isEmpty
+        let resourceName = hasError ? "error" : (appModel.syncEnabled ? "default" : "default-inactive")
+        let isTemplate = resourceName != "default-inactive"
 
-        if !appModel.syncEnabled {
-            resourceName = hasError ? "error-inactive" : "default-inactive"
-            isTemplate = false
-        } else if hasError {
-            resourceName = "error"
-            isTemplate = true
-        } else {
-            resourceName = "default"
-            isTemplate = true
-        }
-
-        if let image = Self.loadTrayImage(named: resourceName) {
-            let sizedImage = Self.makeStatusBarImage(from: image, targetHeight: button.bounds.height)
-            sizedImage.isTemplate = isTemplate
-            button.image = sizedImage
+        if let image = trayImage(named: resourceName, targetHeight: button.bounds.height, isTemplate: isTemplate) {
+            button.image = image
             button.title = ""
         } else {
             button.image = nil
@@ -124,31 +105,20 @@ final class StatusMenuController {
         }
     }
 
-    private static func symbolImage(named name: String) -> NSImage? {
-        NSImage(systemSymbolName: name, accessibilityDescription: nil)
-    }
+    private func trayImage(named name: String, targetHeight: CGFloat, isTemplate: Bool) -> NSImage? {
+        if let image = trayImages[name] { return image }
 
-    private static func loadTrayImage(named name: String) -> NSImage? {
         let bundle = Bundle.main
-        let candidates: [(String?, String)] = [
-            ("tray", name),
-            (nil, name),
-        ]
-
-        for (directory, resourceName) in candidates {
-            if let url = bundle.url(forResource: resourceName, withExtension: "png", subdirectory: directory),
-               let image = NSImage(contentsOf: url) {
-                return image
-            }
+        for directory in ["tray", nil] {
+            guard let url = bundle.url(forResource: name, withExtension: "png", subdirectory: directory),
+                  let image = NSImage(contentsOf: url) else { continue }
+            let side = min(max(targetHeight - 6, 14), 18)
+            image.size = NSSize(width: side, height: side)
+            image.isTemplate = isTemplate
+            trayImages[name] = image
+            return image
         }
 
         return nil
-    }
-
-    private static func makeStatusBarImage(from image: NSImage, targetHeight: CGFloat) -> NSImage {
-        let resized = (image.copy() as? NSImage) ?? image
-        let side = min(max(targetHeight - 6, 14), 18)
-        resized.size = NSSize(width: side, height: side)
-        return resized
     }
 }

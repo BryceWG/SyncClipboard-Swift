@@ -47,6 +47,12 @@ Deliberately excluded unless the user asks for them:
   unit tests
 - `build/macos/`
   packaging script, plist template, app icon
+- `Resources/zh-Hans.lproj/Localizable.strings`
+  Chinese translations. English is the development region and the translation
+  keys, so only `zh-Hans.lproj` exists. It is bundled as a folder reference
+  (see `project.yml`), so keep the `.lproj` directory layout.
+  The SwiftPM executable (`swift run`) does not see these resources and
+  always falls back to English.
 - `project.yml`
   XcodeGen source of truth for the native Xcode project
 - `SyncClipboard-Swift.xcodeproj/`
@@ -127,6 +133,10 @@ When changing protocol handling, keep compatibility with the official server unl
 - Prefer changes inside `SyncClipboardKit` unless the issue is UI-only.
 - Add or update unit tests when changing protocol logic, URL construction, request behavior, or tracker behavior.
 - Preserve the minimal UI. Avoid adding new settings panels or feature flags without a clear product need.
+- All user-facing strings are localized (English keys + zh-Hans translations):
+  - SwiftUI literal `Text`/`Toggle`/`Section` titles localize automatically; add the English text as a key in `Resources/zh-Hans.lproj/Localizable.strings`.
+  - Dynamic strings use `L10n.tr(...)` in the app target and `NSLocalizedString(..., bundle: .main, ...)` in `SyncClipboardKit`.
+  - When adding a user-facing string, always add the zh-Hans entry.
 - Be careful with state races between SignalR callbacks, manual refresh, and pasteboard change handling.
 - Keep local app identity isolated from the legacy client:
   - app name: `SyncClipboard-Swift`

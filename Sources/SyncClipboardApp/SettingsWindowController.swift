@@ -9,7 +9,7 @@ final class SettingsWindowController {
     init(appModel: AppModel) {
         let hostingController = NSHostingController(rootView: SettingsView(appModel: appModel))
         let window = NSWindow(contentViewController: hostingController)
-        window.title = "SyncClipboard-Swift"
+        window.title = L10n.tr("Settings")
         window.setContentSize(NSSize(width: 520, height: 640))
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.isReleasedWhenClosed = false
