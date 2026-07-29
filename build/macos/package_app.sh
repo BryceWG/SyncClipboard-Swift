@@ -10,7 +10,7 @@ SCHEME_NAME="$APP_NAME"
 MARKETING_VERSION="${MARKETING_VERSION:-0.1.0}"
 BUILD_VERSION="${BUILD_VERSION:-$(date +%Y%m%d%H%M%S)}"
 RUN_ID="$(date +%Y%m%d%H%M%S)-$$"
-ZIP_PATH="$DIST_DIR/${APP_NAME}-${MARKETING_VERSION}-macOS.zip"
+DMG_PATH="$DIST_DIR/${APP_NAME}-${MARKETING_VERSION}-macOS.dmg"
 APP_BUNDLE="$DIST_DIR/${APP_NAME}.app"
 
 if [[ -n "${BUILD_ROOT:-}" ]]; then
@@ -78,6 +78,7 @@ require_command xcodegen
 require_command xcodebuild
 require_command codesign
 require_command ditto
+require_command hdiutil
 require_command mktemp
 
 cd "$ROOT_DIR"
@@ -90,7 +91,7 @@ mkdir -p "$(dirname "$ARCHIVE_PATH")"
 stash_existing_path "$DERIVED_DATA_PATH" "derived data"
 stash_existing_path "$ARCHIVE_PATH" "archive"
 stash_existing_path "$APP_BUNDLE" "app bundle"
-stash_existing_path "$ZIP_PATH" "zip archive"
+stash_existing_path "$DMG_PATH" "disk image"
 
 xcodebuild \
   -project "$PROJECT_PATH" \
@@ -114,7 +115,16 @@ ditto "$ARCHIVED_APP" "$APP_BUNDLE"
 
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 
-ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+DMG_STAGING_DIR="$BUILD_ROOT/dmg-staging-$RUN_ID"
+mkdir -p "$DMG_STAGING_DIR"
+ditto "$APP_BUNDLE" "$DMG_STAGING_DIR/$APP_NAME.app"
+ln -s /Applications "$DMG_STAGING_DIR/Applications"
+hdiutil create \
+  -volname "$APP_NAME" \
+  -srcfolder "$DMG_STAGING_DIR" \
+  -format UDZO \
+  "$DMG_PATH"
+hdiutil verify "$DMG_PATH"
 
 echo "App bundle: $APP_BUNDLE"
-echo "ZIP archive: $ZIP_PATH"
+echo "DMG image: $DMG_PATH"

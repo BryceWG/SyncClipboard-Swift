@@ -147,7 +147,7 @@ xcodebuild \
 
 ## Packaging
 
-Generate a locally signed `.app` bundle and a zip archive:
+Generate a locally signed `.app` bundle and a drag-to-install DMG:
 
 ```bash
 zsh build/macos/package_app.sh
@@ -159,7 +159,9 @@ The script:
 - archives the native macOS app target with `xcodebuild`
 - verifies the resulting `.app` with `codesign`
 - emits `dist/SyncClipboard-Swift.app`
-- emits `dist/SyncClipboard-Swift-0.1.0-macOS.zip`
+- emits `dist/SyncClipboard-Swift-<version>-macOS.dmg`
+
+Open the DMG and drag `SyncClipboard-Swift.app` onto the `Applications` shortcut.
 
 You can override versions at packaging time:
 

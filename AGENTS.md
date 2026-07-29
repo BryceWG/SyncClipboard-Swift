@@ -76,7 +76,7 @@ zsh build/macos/package_app.sh
 Packaged outputs:
 
 - `dist/SyncClipboard-Swift.app`
-- `dist/SyncClipboard-Swift-<version>-macOS.zip`
+- `dist/SyncClipboard-Swift-<version>-macOS.dmg`
 
 Important:
 
