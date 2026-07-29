@@ -76,6 +76,7 @@ public final class SyncCoordinator {
             let profile = try await httpClient.fetchCurrentProfile()
             return await handleRemoteProfileChange(profile, using: clipboardService)
         } catch {
+            guard !Task.isCancelled else { return false }
             diagnostics.lastError = error.localizedDescription
             diagnosticsHandler?(diagnostics)
             return false

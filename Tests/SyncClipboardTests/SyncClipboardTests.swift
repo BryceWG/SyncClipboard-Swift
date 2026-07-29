@@ -959,6 +959,55 @@ final class SyncClipboardTests: XCTestCase {
         XCTAssertFalse(AppModel.shouldMonitorClipboard(syncEnabled: true, requiresSetup: false, screenAwake: true, sessionActive: false))
     }
 
+    func testPollingDelayBacksOffAfterFailuresAndResetsAfterSuccess() {
+        XCTAssertEqual(AppModel.nextPollingDelay(configuredInterval: 1, previousDelay: 1, succeeded: false), 2)
+        XCTAssertEqual(AppModel.nextPollingDelay(configuredInterval: 1, previousDelay: 2, succeeded: false), 4)
+        XCTAssertEqual(AppModel.nextPollingDelay(configuredInterval: 1, previousDelay: 40, succeeded: false), 60)
+        XCTAssertEqual(AppModel.nextPollingDelay(configuredInterval: 1, previousDelay: 60, succeeded: true), 1)
+    }
+
+    @MainActor
+    func testPollingStopsAcrossRapidSleepWakeTransitions() async throws {
+        let requests = RequestLog()
+        let responseData = try JSONEncoder().encode(ProfileDTO(text: "remote"))
+        MockURLProtocol.requestHandler = { request in
+            requests.append(request.url!.absoluteString)
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                responseData
+            )
+        }
+        let settings = AppSettings(
+            serverURL: "https://example.com",
+            username: "alice",
+            syncEnabled: true,
+            showNotifications: false,
+            receiveMode: .polling,
+            pollingIntervalSeconds: 0.5,
+            autoReconnect: false
+        )
+        let model = AppModel(
+            settingsStore: FakeSettingsStore(loadedSettings: settings),
+            keychainStore: FakeKeychainStore(readPassword: "secret"),
+            httpClient: SyncClipboardHTTPClient(session: makeMockSession()),
+            clipboardService: FakeClipboardService(),
+            launchAtLoginManager: FakeLaunchAtLoginManager(),
+            realtimeClient: FakeRealtimeClient()
+        )
+
+        model.start()
+        await waitForRequestCount(1, in: requests)
+        model.handleScreenSleep()
+        model.handleScreenWake()
+        await waitForRequestCount(2, in: requests)
+        model.handleScreenSleep()
+        try await Task.sleep(nanoseconds: 700_000_000)
+
+        XCTAssertEqual(requests.snapshot.count, 2)
+        XCTAssertTrue(model.lastErrorText.isEmpty)
+        await model.stop()
+    }
+
     @MainActor
     func testPersistSettingsStoresPasswordBeforeSettingsFile() async {
         let operations = RequestLog()
@@ -1053,6 +1102,14 @@ final class SyncClipboardTests: XCTestCase {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
         return URLSession(configuration: configuration)
+    }
+
+    @MainActor
+    private func waitForRequestCount(_ expectedCount: Int, in log: RequestLog) async {
+        for _ in 0 ..< 50 {
+            if log.snapshot.count >= expectedCount { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
     }
 }
 #endif

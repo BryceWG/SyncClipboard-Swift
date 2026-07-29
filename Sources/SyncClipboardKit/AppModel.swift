@@ -37,6 +37,7 @@ public final class AppModel: ObservableObject {
     private let launchAtLoginManager: any LaunchAtLoginManaging
     private var persistedSettings: AppSettings
     private var pollingTask: Task<Void, Never>?
+    private var pollingTaskID: UUID?
     private var hasStarted = false
     private var screenAwake = true
     private var sessionActive = true
@@ -270,30 +271,29 @@ public final class AppModel: ObservableObject {
                 await realtimeClient.start(configuration: configuration)
                 _ = await coordinator.refreshFromServer(using: clipboardService)
             case .polling:
-                connectionStatusText = "Polling"
-                _ = await coordinator.refreshFromServer(using: clipboardService)
+                updatePollingForActivity(forceRefresh: true)
             }
         }
     }
 
     public func handleScreenSleep() {
         screenAwake = false
-        updateClipboardMonitoring()
+        updateActivityDependentWork()
     }
 
     public func handleScreenWake() {
         screenAwake = true
-        updateClipboardMonitoring()
+        updateActivityDependentWork()
     }
 
     public func handleSessionResignActive() {
         sessionActive = false
-        updateClipboardMonitoring()
+        updateActivityDependentWork()
     }
 
     public func handleSessionBecomeActive() {
         sessionActive = true
-        updateClipboardMonitoring()
+        updateActivityDependentWork()
     }
 
     private func applyRuntimeConfiguration(forceRefresh: Bool) async {
@@ -319,7 +319,7 @@ public final class AppModel: ObservableObject {
         case .polling:
             await realtimeClient.stop()
             connectionStatusText = "Polling"
-            startPollingLoop(forceRefresh: forceRefresh)
+            updatePollingForActivity(forceRefresh: forceRefresh)
         }
     }
 
@@ -369,37 +369,86 @@ public final class AppModel: ObservableObject {
 
     private func startPollingLoop(forceRefresh: Bool) {
         stopPollingLoop()
+        let taskID = UUID()
+        pollingTaskID = taskID
 
         pollingTask = Task { [weak self] in
             guard let self else { return }
+            guard !Task.isCancelled else {
+                self.finishPollingTask(id: taskID)
+                return
+            }
+            let configuredInterval = min(max(self.pollingIntervalSeconds, 0.5), 60.0)
+            var nextInterval = configuredInterval
 
             if forceRefresh {
                 let succeeded = await self.coordinator.refreshFromServer(using: self.clipboardService)
-                if !succeeded && !self.autoReconnect {
-                    self.connectionStatusText = "Error"
-                    self.pollingTask = nil
+                guard !Task.isCancelled else {
+                    self.finishPollingTask(id: taskID)
                     return
                 }
+                if !succeeded && !self.autoReconnect {
+                    self.connectionStatusText = "Error"
+                    self.finishPollingTask(id: taskID)
+                    return
+                }
+                nextInterval = Self.nextPollingDelay(
+                    configuredInterval: configuredInterval,
+                    previousDelay: nextInterval,
+                    succeeded: succeeded
+                )
             }
 
             while !Task.isCancelled {
-                let interval = max(self.pollingIntervalSeconds, 0.5)
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(nextInterval * 1_000_000_000))
                 guard !Task.isCancelled else { break }
                 let succeeded = await self.coordinator.refreshFromServer(using: self.clipboardService)
+                guard !Task.isCancelled else { break }
                 if !succeeded && !self.autoReconnect {
                     self.connectionStatusText = "Error"
                     break
                 }
+                nextInterval = Self.nextPollingDelay(
+                    configuredInterval: configuredInterval,
+                    previousDelay: nextInterval,
+                    succeeded: succeeded
+                )
             }
 
-            self.pollingTask = nil
+            self.finishPollingTask(id: taskID)
         }
     }
 
     private func stopPollingLoop() {
         pollingTask?.cancel()
         pollingTask = nil
+        pollingTaskID = nil
+    }
+
+    private func finishPollingTask(id: UUID) {
+        guard pollingTaskID == id else { return }
+        pollingTask = nil
+        pollingTaskID = nil
+    }
+
+    private func updateActivityDependentWork() {
+        updateClipboardMonitoring()
+        updatePollingForActivity(forceRefresh: true)
+    }
+
+    private func updatePollingForActivity(forceRefresh: Bool) {
+        guard receiveMode == .polling else { return }
+
+        if hasStarted && Self.shouldMonitorClipboard(
+            syncEnabled: syncEnabled,
+            requiresSetup: requiresSetup,
+            screenAwake: screenAwake,
+            sessionActive: sessionActive
+        ) {
+            startPollingLoop(forceRefresh: forceRefresh)
+        } else {
+            stopPollingLoop()
+        }
     }
 
     private func updateClipboardMonitoring() {
@@ -463,5 +512,14 @@ public final class AppModel: ObservableObject {
         sessionActive: Bool
     ) -> Bool {
         syncEnabled && !requiresSetup && screenAwake && sessionActive
+    }
+
+    nonisolated static func nextPollingDelay(
+        configuredInterval: TimeInterval,
+        previousDelay: TimeInterval,
+        succeeded: Bool
+    ) -> TimeInterval {
+        let configuredInterval = min(max(configuredInterval, 0.5), 60.0)
+        return succeeded ? configuredInterval : min(max(previousDelay, configuredInterval) * 2, 60.0)
     }
 }
