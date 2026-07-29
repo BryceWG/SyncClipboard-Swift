@@ -19,8 +19,8 @@ public final class AppModel: ObservableObject {
     @Published public var pollingIntervalSeconds: Double
     @Published public var autoReconnect: Bool
     @Published public private(set) var connectionStatusText = "Disconnected"
-    @Published public private(set) var lastPushText = "Never"
-    @Published public private(set) var lastPullText = "Never"
+    @Published public private(set) var lastPushAt: Date?
+    @Published public private(set) var lastPullAt: Date?
     @Published public private(set) var lastErrorText = ""
 
     public let clipboardMonitor: ClipboardMonitor
@@ -32,9 +32,10 @@ public final class AppModel: ObservableObject {
     private let realtimeClient: any RealtimeClient
     private let coordinator: SyncCoordinator
     private let launchAtLoginManager: any LaunchAtLoginManaging
-    private let realtimeHealthCheckIntervalSeconds: TimeInterval
     private var pollingTask: Task<Void, Never>?
-    private var realtimeHealthTask: Task<Void, Never>?
+    private var hasStarted = false
+    private var screenAwake = true
+    private var sessionActive = true
 
     public init(
         settingsStore: any SettingsStoring = SettingsStore(),
@@ -42,15 +43,13 @@ public final class AppModel: ObservableObject {
         httpClient: SyncClipboardHTTPClient = SyncClipboardHTTPClient(),
         clipboardService: any ClipboardServicing = ClipboardService(),
         launchAtLoginManager: any LaunchAtLoginManaging = LaunchAtLoginManager(),
-        realtimeClient: (any RealtimeClient)? = nil,
-        realtimeHealthCheckIntervalSeconds: TimeInterval = 15
+        realtimeClient: (any RealtimeClient)? = nil
     ) {
         self.settingsStore = settingsStore
         self.keychainStore = keychainStore
         self.httpClient = httpClient
         self.clipboardService = clipboardService
         self.launchAtLoginManager = launchAtLoginManager
-        self.realtimeHealthCheckIntervalSeconds = max(realtimeHealthCheckIntervalSeconds, 5)
         self.clipboardMonitor = ClipboardMonitor()
 
         let loadedSettings = (try? settingsStore.load()) ?? AppSettings()
@@ -94,22 +93,23 @@ public final class AppModel: ObservableObject {
     }
 
     public func start() {
-        clipboardMonitor.start()
+        hasStarted = true
         Task { await applyRuntimeConfiguration(forceRefresh: true) }
     }
 
     public func stop() async {
+        hasStarted = false
         clipboardMonitor.stop()
         clipboardMonitor.onChange = nil
         stopPollingLoop()
-        stopRealtimeHealthLoop()
         realtimeClient.onProfileChanged = nil
         realtimeClient.onStateChange = nil
         coordinator.diagnosticsHandler = nil
         await realtimeClient.stop()
     }
 
-    public func persistSettings() async {
+    @discardableResult
+    public func persistSettings() async -> Bool {
         let requestedLaunchAtLogin = launchAtLogin
         var issueText: String?
 
@@ -145,11 +145,14 @@ public final class AppModel: ObservableObject {
             issueText = error.localizedDescription
         }
 
+        let succeeded = issueText == nil
         lastErrorText = issueText ?? ""
         await applyRuntimeConfiguration(forceRefresh: false)
+        return succeeded
     }
 
-    public func testConnection() async {
+    @discardableResult
+    public func testConnection() async -> Bool {
         let configuration = buildServerConfiguration()
 
         do {
@@ -159,21 +162,15 @@ public final class AppModel: ObservableObject {
                 for: configuration?.receiveMode ?? receiveMode
             )
             lastErrorText = ""
+            return true
         } catch {
             connectionStatusText = "Error"
             lastErrorText = error.localizedDescription
+            return false
         }
     }
 
     public func syncNow() async {
-        await performExplicitSyncCycle()
-    }
-
-    func performRealtimeHealthCheckCycle() async {
-        guard syncEnabled, autoReconnect, !requiresSetup, receiveMode == .realtime else {
-            return
-        }
-
         await performExplicitSyncCycle()
     }
 
@@ -214,14 +211,34 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    public func handleScreenSleep() {
+        screenAwake = false
+        updateClipboardMonitoring()
+    }
+
+    public func handleScreenWake() {
+        screenAwake = true
+        updateClipboardMonitoring()
+    }
+
+    public func handleSessionResignActive() {
+        sessionActive = false
+        updateClipboardMonitoring()
+    }
+
+    public func handleSessionBecomeActive() {
+        sessionActive = true
+        updateClipboardMonitoring()
+    }
+
     private func applyRuntimeConfiguration(forceRefresh: Bool) async {
         let configuration = buildServerConfiguration()
         httpClient.updateConfiguration(configuration)
         coordinator.updatePreferences(syncEnabled: syncEnabled, showNotifications: showNotifications)
+        updateClipboardMonitoring()
 
         guard let configuration, syncEnabled else {
             stopPollingLoop()
-            stopRealtimeHealthLoop()
             connectionStatusText = syncEnabled ? "Missing Config" : "Disabled"
             await realtimeClient.stop()
             return
@@ -231,12 +248,10 @@ public final class AppModel: ObservableObject {
         case .realtime:
             stopPollingLoop()
             await realtimeClient.start(configuration: configuration)
-            startRealtimeHealthLoop()
             if forceRefresh {
                 _ = await coordinator.refreshFromServer(using: clipboardService)
             }
         case .polling:
-            stopRealtimeHealthLoop()
             await realtimeClient.stop()
             connectionStatusText = "Polling"
             startPollingLoop(forceRefresh: forceRefresh)
@@ -276,12 +291,8 @@ public final class AppModel: ObservableObject {
     }
 
     private func applyDiagnostics(_ diagnostics: SyncDiagnostics) {
-        if let lastPushAt = diagnostics.lastPushAt {
-            lastPushText = Self.relativeFormatter.localizedString(for: lastPushAt, relativeTo: Date())
-        }
-        if let lastPullAt = diagnostics.lastPullAt {
-            lastPullText = Self.relativeFormatter.localizedString(for: lastPullAt, relativeTo: Date())
-        }
+        lastPushAt = diagnostics.lastPushAt
+        lastPullAt = diagnostics.lastPullAt
         lastErrorText = diagnostics.lastError ?? ""
 
         guard syncEnabled, !requiresSetup, receiveMode == .polling else {
@@ -326,45 +337,18 @@ public final class AppModel: ObservableObject {
         pollingTask = nil
     }
 
-    private func startRealtimeHealthLoop() {
-        stopRealtimeHealthLoop()
-
-        guard syncEnabled, autoReconnect, !requiresSetup, receiveMode == .realtime else {
-            return
-        }
-
-        let interval = realtimeHealthCheckIntervalSeconds
-        realtimeHealthTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-                } catch {
-                    break
-                }
-
-                guard !Task.isCancelled else {
-                    break
-                }
-
-                await self.performRealtimeHealthCheckCycle()
-            }
-
-            self.realtimeHealthTask = nil
+    private func updateClipboardMonitoring() {
+        if hasStarted && Self.shouldMonitorClipboard(
+            syncEnabled: syncEnabled,
+            requiresSetup: requiresSetup,
+            screenAwake: screenAwake,
+            sessionActive: sessionActive
+        ) {
+            clipboardMonitor.start()
+        } else {
+            clipboardMonitor.stop()
         }
     }
-
-    private func stopRealtimeHealthLoop() {
-        realtimeHealthTask?.cancel()
-        realtimeHealthTask = nil
-    }
-
-    private static let relativeFormatter: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return formatter
-    }()
 
     nonisolated static func realtimePresentationState(for state: RealtimeState) -> RealtimePresentationState {
         switch state {
@@ -405,5 +389,14 @@ public final class AppModel: ObservableObject {
         case .polling:
             return "Polling"
         }
+    }
+
+    nonisolated static func shouldMonitorClipboard(
+        syncEnabled: Bool,
+        requiresSetup: Bool,
+        screenAwake: Bool,
+        sessionActive: Bool
+    ) -> Bool {
+        syncEnabled && !requiresSetup && screenAwake && sessionActive
     }
 }

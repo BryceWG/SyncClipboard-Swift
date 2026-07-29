@@ -61,10 +61,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func observeWorkspaceNotifications() {
-        NSWorkspace.shared.notificationCenter
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+
+        notificationCenter
             .publisher(for: NSWorkspace.didWakeNotification)
             .sink { [weak self] _ in
                 self?.appModel.handleSystemWake()
+            }
+            .store(in: &cancellables)
+
+        notificationCenter
+            .publisher(for: NSWorkspace.screensDidSleepNotification)
+            .sink { [weak self] _ in
+                self?.appModel.handleScreenSleep()
+            }
+            .store(in: &cancellables)
+
+        notificationCenter
+            .publisher(for: NSWorkspace.screensDidWakeNotification)
+            .sink { [weak self] _ in
+                self?.appModel.handleScreenWake()
+            }
+            .store(in: &cancellables)
+
+        notificationCenter
+            .publisher(for: NSWorkspace.sessionDidResignActiveNotification)
+            .sink { [weak self] _ in
+                self?.appModel.handleSessionResignActive()
+            }
+            .store(in: &cancellables)
+
+        notificationCenter
+            .publisher(for: NSWorkspace.sessionDidBecomeActiveNotification)
+            .sink { [weak self] _ in
+                self?.appModel.handleSessionBecomeActive()
             }
             .store(in: &cancellables)
     }

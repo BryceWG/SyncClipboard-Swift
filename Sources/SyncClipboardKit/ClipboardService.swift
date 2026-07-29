@@ -27,35 +27,33 @@ public final class ClipboardService: ClipboardServicing {
 
     public func write(_ snapshot: ClipboardSnapshot) throws {
         let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
 
         switch snapshot.payload {
         case .text(let text):
+            pasteboard.clearContents()
             pasteboard.setString(text, forType: .string)
 
         case .image(let data):
-            guard let image = NSImage(data: data) else {
+            guard NSImage(data: data) != nil else {
                 throw SyncClipboardError.invalidImageData
             }
 
-            if !pasteboard.writeObjects([image]) {
-                pasteboard.setData(data, forType: .png)
-            }
+            pasteboard.clearContents()
+            pasteboard.setData(data, forType: .png)
         }
     }
 
     private func extractImage(from pasteboard: NSPasteboard) -> Data? {
-        let hasImageType = pasteboard.types?.contains(where: { type in
-            type == .png || type == .tiff
-        }) ?? false
+        if let pngData = pasteboard.data(forType: .png), NSImage(data: pngData) != nil {
+            return pngData
+        }
 
-        guard hasImageType,
-              let images = pasteboard.readObjects(forClasses: [NSImage.self]),
-              let image = images.first as? NSImage else {
+        guard let tiffData = pasteboard.data(forType: .tiff),
+              let bitmap = NSBitmapImageRep(data: tiffData) else {
             return nil
         }
 
-        return image.pngData()
+        return bitmap.representation(using: .png, properties: [:])
     }
 }
 
@@ -68,19 +66,22 @@ public final class ClipboardMonitor {
     private var debounceItem: DispatchWorkItem?
     private var lastChangeCount: Int
 
-    public init(interval: TimeInterval = 0.3) {
+    public init(interval: TimeInterval = 0.5) {
         self.interval = interval
         self.lastChangeCount = NSPasteboard.general.changeCount
     }
 
     public func start() {
-        stop()
+        guard timer == nil else { return }
+
         lastChangeCount = NSPasteboard.general.changeCount
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
                 self?.pollPasteboard()
             }
         }
+        timer.tolerance = interval / 2
+        self.timer = timer
     }
 
     public func stop() {
@@ -104,16 +105,5 @@ public final class ClipboardMonitor {
         }
         debounceItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: item)
-    }
-}
-
-private extension NSImage {
-    func pngData() -> Data? {
-        guard let tiffData = tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiffData) else {
-            return nil
-        }
-
-        return bitmap.representation(using: .png, properties: [:])
     }
 }

@@ -2,9 +2,28 @@ import Foundation
 import SwiftUI
 import SyncClipboardKit
 
+private enum ActionState: Equatable {
+    case idle
+    case running
+    case succeeded
+    case failed
+
+    var isRunning: Bool { self == .running }
+
+    func title(idle: String, running: String, succeeded: String, failed: String) -> String {
+        switch self {
+        case .idle: idle
+        case .running: running
+        case .succeeded: succeeded
+        case .failed: failed
+        }
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var appModel: AppModel
-    @State private var isTestingConnection = false
+    @State private var connectionTestState = ActionState.idle
+    @State private var saveState = ActionState.idle
     @State private var isSyncing = false
 
     var body: some View {
@@ -33,8 +52,8 @@ struct SettingsView: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Connection status: \(appModel.connectionStatusText)")
 
-            LabeledContent("Last Push", value: appModel.lastPushText)
-            LabeledContent("Last Pull", value: appModel.lastPullText)
+            activityRow("Last Push", date: appModel.lastPushAt)
+            activityRow("Last Pull", date: appModel.lastPullAt)
 
             if !appModel.lastErrorText.isEmpty {
                 Text(appModel.lastErrorText)
@@ -67,35 +86,71 @@ struct SettingsView: View {
     private var serverSection: some View {
         Section("Server") {
             TextField("Server URL", text: $appModel.serverURL, prompt: Text("https://your-server.example"))
+                .disabled(serverActionInProgress)
             TextField("Username", text: $appModel.username, prompt: Text("Account name"))
+                .disabled(serverActionInProgress)
             SecureField("Password", text: $appModel.password, prompt: Text("Password"))
+                .disabled(serverActionInProgress)
 
             HStack(spacing: 8) {
                 Button {
                     Task {
-                        isTestingConnection = true
-                        await appModel.testConnection()
-                        isTestingConnection = false
+                        connectionTestState = .running
+                        connectionTestState = await appModel.testConnection() ? .succeeded : .failed
                     }
                 } label: {
                     HStack(spacing: 6) {
-                        if isTestingConnection {
+                        if connectionTestState.isRunning {
                             ProgressView()
                                 .controlSize(.small)
+                        } else if connectionTestState == .succeeded {
+                            Image(systemName: "checkmark")
+                        } else if connectionTestState == .failed {
+                            Image(systemName: "xmark")
                         }
-                        Text(isTestingConnection ? "Testing…" : "Test Connection")
+                        Text(connectionTestState.title(
+                            idle: "Test Connection",
+                            running: "Testing…",
+                            succeeded: "Connection OK",
+                            failed: "Test Failed"
+                        ))
                     }
                 }
-                .disabled(isTestingConnection)
+                .disabled(serverActionInProgress)
 
                 Spacer()
 
-                Button("Save Changes") {
-                    Task { await appModel.persistSettings() }
+                Button {
+                    Task {
+                        saveState = .running
+                        saveState = await appModel.persistSettings() ? .succeeded : .failed
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if saveState.isRunning {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else if saveState == .succeeded {
+                            Image(systemName: "checkmark")
+                        } else if saveState == .failed {
+                            Image(systemName: "xmark")
+                        }
+                        Text(saveState.title(
+                            idle: "Save Changes",
+                            running: "Saving…",
+                            succeeded: "Saved",
+                            failed: "Save Failed"
+                        ))
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
+                .disabled(serverActionInProgress)
             }
+        }
+        .onChange(of: [appModel.serverURL, appModel.username, appModel.password]) { _ in
+            connectionTestState = .idle
+            saveState = .idle
         }
     }
 
@@ -179,6 +234,21 @@ struct SettingsView: View {
             return .red
         default:
             return Color(.tertiaryLabelColor)
+        }
+    }
+
+    private var serverActionInProgress: Bool {
+        connectionTestState.isRunning || saveState.isRunning
+    }
+
+    @ViewBuilder
+    private func activityRow(_ title: String, date: Date?) -> some View {
+        LabeledContent(title) {
+            if let date {
+                Text(date, style: .relative)
+            } else {
+                Text("Never")
+            }
         }
     }
 

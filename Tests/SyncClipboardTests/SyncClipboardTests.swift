@@ -704,111 +704,19 @@ final class SyncClipboardTests: XCTestCase {
         )
     }
 
-    @MainActor
-    func testRealtimeHealthCheckPerformsExplicitSyncCycleWhenAutoReconnectEnabled() async {
-        let log = RequestLog()
-        let session = makeMockSession()
-        let httpClient = SyncClipboardHTTPClient(session: session)
-        let clipboardService = FakeClipboardService()
-        let realtimeClient = FakeRealtimeClient()
-        let settingsStore = FakeSettingsStore(
-            loadedSettings: AppSettings(
-                serverURL: "https://example.com/sync/",
-                username: "alice",
-                keychainAccount: "primary",
+    func testClipboardMonitoringRequiresReadyActiveSession() {
+        XCTAssertTrue(
+            AppModel.shouldMonitorClipboard(
                 syncEnabled: true,
-                launchAtLogin: false,
-                showNotifications: false,
-                showDockIcon: true,
-                receiveMode: .realtime,
-                pollingIntervalSeconds: 1.0,
-                autoReconnect: true
+                requiresSetup: false,
+                screenAwake: true,
+                sessionActive: true
             )
         )
-        let keychainStore = FakeKeychainStore(readPassword: "secret")
-
-        clipboardService.nextSnapshot = .text("local text")
-
-        MockURLProtocol.requestHandler = { request in
-            let url = try XCTUnwrap(request.url)
-            log.append("\(request.httpMethod ?? "GET") \(url.absoluteString)")
-
-            switch (request.httpMethod, url.path) {
-            case ("PUT", "/sync/SyncClipboard.json"):
-                return (
-                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
-                    Data()
-                )
-            default:
-                XCTFail("Unexpected request: \(request.httpMethod ?? "GET") \(url.absoluteString)")
-                return (
-                    HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!,
-                    Data()
-                )
-            }
-        }
-
-        let model = AppModel(
-            settingsStore: settingsStore,
-            keychainStore: keychainStore,
-            httpClient: httpClient,
-            clipboardService: clipboardService,
-            launchAtLoginManager: FakeLaunchAtLoginManager(),
-            realtimeClient: realtimeClient
-        )
-
-        await model.performRealtimeHealthCheckCycle()
-
-        XCTAssertEqual(
-            log.snapshot,
-            ["PUT https://example.com/sync/SyncClipboard.json"]
-        )
-        XCTAssertEqual(realtimeClient.pollCount, 1)
-    }
-
-    @MainActor
-    func testRealtimeHealthCheckSkipsWhenAutoReconnectDisabled() async {
-        let session = makeMockSession()
-        let httpClient = SyncClipboardHTTPClient(session: session)
-        let clipboardService = FakeClipboardService()
-        let realtimeClient = FakeRealtimeClient()
-        let settingsStore = FakeSettingsStore(
-            loadedSettings: AppSettings(
-                serverURL: "https://example.com/sync/",
-                username: "alice",
-                keychainAccount: "primary",
-                syncEnabled: true,
-                launchAtLogin: false,
-                showNotifications: false,
-                showDockIcon: true,
-                receiveMode: .realtime,
-                pollingIntervalSeconds: 1.0,
-                autoReconnect: false
-            )
-        )
-        let keychainStore = FakeKeychainStore(readPassword: "secret")
-
-        clipboardService.nextSnapshot = .text("local text")
-        MockURLProtocol.requestHandler = { request in
-            XCTFail("Unexpected request: \(request)")
-            return (
-                HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!,
-                Data()
-            )
-        }
-
-        let model = AppModel(
-            settingsStore: settingsStore,
-            keychainStore: keychainStore,
-            httpClient: httpClient,
-            clipboardService: clipboardService,
-            launchAtLoginManager: FakeLaunchAtLoginManager(),
-            realtimeClient: realtimeClient
-        )
-
-        await model.performRealtimeHealthCheckCycle()
-
-        XCTAssertEqual(realtimeClient.pollCount, 0)
+        XCTAssertFalse(AppModel.shouldMonitorClipboard(syncEnabled: false, requiresSetup: false, screenAwake: true, sessionActive: true))
+        XCTAssertFalse(AppModel.shouldMonitorClipboard(syncEnabled: true, requiresSetup: true, screenAwake: true, sessionActive: true))
+        XCTAssertFalse(AppModel.shouldMonitorClipboard(syncEnabled: true, requiresSetup: false, screenAwake: false, sessionActive: true))
+        XCTAssertFalse(AppModel.shouldMonitorClipboard(syncEnabled: true, requiresSetup: false, screenAwake: true, sessionActive: false))
     }
 
     @MainActor
@@ -833,8 +741,9 @@ final class SyncClipboardTests: XCTestCase {
         model.username = "alice"
         model.password = "secret"
 
-        await model.persistSettings()
+        let succeeded = await model.persistSettings()
 
+        XCTAssertTrue(succeeded)
         XCTAssertEqual(
             operations.snapshot,
             ["keychain:primary", "settings:primary"]
@@ -861,8 +770,9 @@ final class SyncClipboardTests: XCTestCase {
 
         model.launchAtLogin = true
 
-        await model.persistSettings()
+        let succeeded = await model.persistSettings()
 
+        XCTAssertFalse(succeeded)
         XCTAssertFalse(model.launchAtLogin)
         XCTAssertEqual(
             model.lastErrorText,
