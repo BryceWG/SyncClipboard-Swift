@@ -7,12 +7,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let appModel = AppModel()
     private var statusMenuController: StatusMenuController?
     private var settingsWindowController: SettingsWindowController?
+    private var globalHotKeyManager: GlobalHotKeyManager?
     private var cancellables = Set<AnyCancellable>()
     private var terminationInProgress = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyDockIconVisibility(appModel.showDockIcon)
         observeWorkspaceNotifications()
+
+        let globalHotKeyManager = GlobalHotKeyManager { [weak appModel = self.appModel] in
+            Task { @MainActor in await appModel?.syncFiles() }
+        }
+        appModel.shortcutRegistrationHandler = { [weak globalHotKeyManager] shortcut in
+            globalHotKeyManager?.register(shortcut) ?? false
+        }
+        if !globalHotKeyManager.register(appModel.transferShortcut) {
+            appModel.reportShortcutRegistrationFailure()
+        }
+        self.globalHotKeyManager = globalHotKeyManager
 
         let settingsWindowController = SettingsWindowController(appModel: appModel)
         let statusMenuController = StatusMenuController(
@@ -43,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         terminationInProgress = true
+        globalHotKeyManager?.invalidate()
         Task { @MainActor in
             await appModel.stop()
             sender.reply(toApplicationShouldTerminate: true)

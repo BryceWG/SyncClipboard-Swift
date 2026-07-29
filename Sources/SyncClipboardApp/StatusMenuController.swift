@@ -12,6 +12,7 @@ final class StatusMenuController {
     private let statusLineItem = NSMenuItem(title: "Status: Disconnected", action: nil, keyEquivalent: "")
     private let syncToggleItem = NSMenuItem(title: "Enable Sync", action: #selector(toggleSync), keyEquivalent: "")
     private let syncNowItem = NSMenuItem(title: "Sync Now", action: #selector(syncNow), keyEquivalent: "")
+    private let syncFilesItem = NSMenuItem(title: "Sync Images/Files", action: #selector(syncFiles), keyEquivalent: "")
     private let settingsItem = NSMenuItem(title: "Open Settings", action: #selector(showSettings), keyEquivalent: ",")
     private let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
 
@@ -27,11 +28,13 @@ final class StatusMenuController {
 
         syncToggleItem.target = self
         syncNowItem.target = self
+        syncFilesItem.target = self
         settingsItem.target = self
         quitItem.target = self
 
         statusLineItem.image = Self.symbolImage(named: "doc.on.clipboard")
         syncNowItem.image = Self.symbolImage(named: "arrow.triangle.2.circlepath")
+        syncFilesItem.image = Self.symbolImage(named: "doc.on.doc")
         settingsItem.image = Self.symbolImage(named: "gearshape")
         quitItem.image = Self.symbolImage(named: "power")
 
@@ -41,6 +44,7 @@ final class StatusMenuController {
         menu.addItem(.separator())
         menu.addItem(syncToggleItem)
         menu.addItem(syncNowItem)
+        menu.addItem(syncFilesItem)
         menu.addItem(settingsItem)
         menu.addItem(.separator())
         menu.addItem(quitItem)
@@ -66,6 +70,10 @@ final class StatusMenuController {
         Task { await appModel.syncNow() }
     }
 
+    @objc private func syncFiles() {
+        Task { await appModel.syncFiles() }
+    }
+
     @objc private func showSettings() {
         openSettings()
     }
@@ -78,6 +86,9 @@ final class StatusMenuController {
         statusLineItem.title = "Status: \(appModel.connectionStatusText)"
         syncToggleItem.state = appModel.syncEnabled ? .on : .off
         syncNowItem.isEnabled = appModel.syncEnabled && !appModel.requiresSetup
+        syncFilesItem.isEnabled = appModel.syncEnabled && !appModel.requiresSetup && !appModel.isFileTransferRunning
+        let shortcut = appModel.transferShortcut.map { "   \(ShortcutDisplay.string(for: $0))" } ?? ""
+        syncFilesItem.title = (appModel.isFileTransferRunning ? "Syncing Images/Files…" : "Sync Images/Files") + shortcut
         updateStatusIcon()
     }
 

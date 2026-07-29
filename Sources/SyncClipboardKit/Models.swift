@@ -1,6 +1,30 @@
 import Foundation
 
 public let textTransferThreshold = 10_240
+public let defaultMaximumTransferSizeBytes: Int64 = 100 * 1_024 * 1_024
+public let maximumTransferSizeLimitBytes: Int64 = 2_047 * 1_024 * 1_024
+
+public struct GlobalShortcut: Codable, Equatable, Sendable {
+    public static let command: UInt32 = 1 << 0
+    public static let control: UInt32 = 1 << 1
+    public static let option: UInt32 = 1 << 2
+    public static let shift: UInt32 = 1 << 3
+    public static let defaultTransfer = GlobalShortcut(
+        keyCode: 9, // V on the ANSI keyboard layout
+        modifiers: command | control | option,
+        displayKey: "V"
+    )
+
+    public var keyCode: UInt32
+    public var modifiers: UInt32
+    public var displayKey: String?
+
+    public init(keyCode: UInt32, modifiers: UInt32, displayKey: String? = nil) {
+        self.keyCode = keyCode
+        self.modifiers = modifiers
+        self.displayKey = displayKey
+    }
+}
 
 public enum RemoteReceiveMode: String, Codable, Equatable, Sendable, CaseIterable, Identifiable {
     case realtime
@@ -58,6 +82,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var receiveMode: RemoteReceiveMode
     public var pollingIntervalSeconds: Double
     public var autoReconnect: Bool
+    public var maximumTransferSizeBytes: Int64
+    public var transferShortcut: GlobalShortcut?
 
     public init(
         serverURL: String = "",
@@ -69,7 +95,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         showDockIcon: Bool = true,
         receiveMode: RemoteReceiveMode = .realtime,
         pollingIntervalSeconds: Double = 1.0,
-        autoReconnect: Bool = true
+        autoReconnect: Bool = true,
+        maximumTransferSizeBytes: Int64 = defaultMaximumTransferSizeBytes,
+        transferShortcut: GlobalShortcut? = .defaultTransfer
     ) {
         self.serverURL = serverURL
         self.username = username
@@ -81,6 +109,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.receiveMode = receiveMode
         self.pollingIntervalSeconds = Self.clampedPollingInterval(pollingIntervalSeconds)
         self.autoReconnect = autoReconnect
+        self.maximumTransferSizeBytes = min(max(1, maximumTransferSizeBytes), maximumTransferSizeLimitBytes)
+        self.transferShortcut = transferShortcut
     }
 
     enum CodingKeys: String, CodingKey {
@@ -95,6 +125,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case pollingIntervalSeconds
         case autoReconnect
         case realtimeTransportMode
+        case maximumTransferSizeBytes
+        case transferShortcut
     }
 
     public init(from decoder: any Decoder) throws {
@@ -115,6 +147,17 @@ public struct AppSettings: Codable, Equatable, Sendable {
         let pollingInterval = try container.decodeIfPresent(Double.self, forKey: .pollingIntervalSeconds) ?? 1.0
         self.pollingIntervalSeconds = Self.clampedPollingInterval(pollingInterval)
         self.autoReconnect = try container.decodeIfPresent(Bool.self, forKey: .autoReconnect) ?? true
+        self.maximumTransferSizeBytes = min(
+            max(
+                1,
+                try container.decodeIfPresent(Int64.self, forKey: .maximumTransferSizeBytes)
+                    ?? defaultMaximumTransferSizeBytes
+            ),
+            maximumTransferSizeLimitBytes
+        )
+        self.transferShortcut = try container.contains(.transferShortcut)
+            ? container.decodeIfPresent(GlobalShortcut.self, forKey: .transferShortcut)
+            : .defaultTransfer
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -129,6 +172,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         try container.encode(receiveMode, forKey: .receiveMode)
         try container.encode(Self.clampedPollingInterval(pollingIntervalSeconds), forKey: .pollingIntervalSeconds)
         try container.encode(autoReconnect, forKey: .autoReconnect)
+        try container.encode(
+            min(max(1, maximumTransferSizeBytes), maximumTransferSizeLimitBytes),
+            forKey: .maximumTransferSizeBytes
+        )
+        try container.encode(transferShortcut, forKey: .transferShortcut)
     }
 
     private static func clampedPollingInterval(_ value: Double) -> Double {
@@ -199,6 +247,10 @@ public enum SyncClipboardError: LocalizedError, Sendable {
     case missingTransferData(ProfileType)
     case invalidTextEncoding
     case invalidImageData
+    case transferTooLarge(Int64)
+    case unsupportedFileSelection
+    case invalidRemoteFileName
+    case archiveFailed(String)
     case unexpectedResponse(Int)
 
     public var errorDescription: String? {
@@ -213,6 +265,14 @@ public enum SyncClipboardError: LocalizedError, Sendable {
             return "Text transfer data is not valid UTF-8."
         case .invalidImageData:
             return "Image data could not be decoded."
+        case .transferTooLarge(let maximumBytes):
+            return "Transfer exceeds the configured limit of \(maximumBytes / 1_024 / 1_024) MiB."
+        case .unsupportedFileSelection:
+            return "The clipboard does not contain readable regular files or folders."
+        case .invalidRemoteFileName:
+            return "The server returned an invalid file name."
+        case .archiveFailed(let message):
+            return "Could not create ZIP archive: \(message)"
         case .unexpectedResponse(let statusCode):
             return "Unexpected HTTP status code: \(statusCode)."
         }

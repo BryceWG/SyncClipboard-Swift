@@ -18,6 +18,9 @@ public final class AppModel: ObservableObject {
     @Published public var receiveMode: RemoteReceiveMode
     @Published public var pollingIntervalSeconds: Double
     @Published public var autoReconnect: Bool
+    @Published public var maximumTransferSizeMiB: Int
+    @Published public private(set) var transferShortcut: GlobalShortcut?
+    @Published public private(set) var isFileTransferRunning = false
     @Published public private(set) var connectionStatusText = "Disconnected"
     @Published public private(set) var lastPushAt: Date?
     @Published public private(set) var lastPullAt: Date?
@@ -32,10 +35,12 @@ public final class AppModel: ObservableObject {
     private let realtimeClient: any RealtimeClient
     private let coordinator: SyncCoordinator
     private let launchAtLoginManager: any LaunchAtLoginManaging
+    private var persistedSettings: AppSettings
     private var pollingTask: Task<Void, Never>?
     private var hasStarted = false
     private var screenAwake = true
     private var sessionActive = true
+    public var shortcutRegistrationHandler: ((GlobalShortcut?) -> Bool)?
 
     public init(
         settingsStore: any SettingsStoring = SettingsStore(),
@@ -65,6 +70,9 @@ public final class AppModel: ObservableObject {
         self.receiveMode = loadedSettings.receiveMode
         self.pollingIntervalSeconds = loadedSettings.pollingIntervalSeconds
         self.autoReconnect = loadedSettings.autoReconnect
+        self.maximumTransferSizeMiB = max(1, Int(loadedSettings.maximumTransferSizeBytes / 1_024 / 1_024))
+        self.transferShortcut = loadedSettings.transferShortcut
+        self.persistedSettings = loadedSettings
 
         let notifier = UserNotifier()
         self.realtimeClient = realtimeClient ?? RealtimeClientFactory.make(httpClient: httpClient)
@@ -125,22 +133,12 @@ public final class AppModel: ObservableObject {
             issueText = Self.launchAtLoginIssueText(forRequestedState: requestedLaunchAtLogin, status: launchStatus)
         }
 
-        let settings = AppSettings(
-            serverURL: serverURL.trimmingCharacters(in: .whitespacesAndNewlines),
-            username: username.trimmingCharacters(in: .whitespacesAndNewlines),
-            keychainAccount: "primary",
-            syncEnabled: syncEnabled,
-            launchAtLogin: launchAtLogin,
-            showNotifications: showNotifications,
-            showDockIcon: showDockIcon,
-            receiveMode: receiveMode,
-            pollingIntervalSeconds: pollingIntervalSeconds,
-            autoReconnect: autoReconnect
-        )
+        let settings = currentSettings()
 
         do {
             try keychainStore.savePassword(password, account: settings.keychainAccount)
             try settingsStore.save(settings)
+            persistedSettings = settings
         } catch {
             issueText = error.localizedDescription
         }
@@ -172,6 +170,73 @@ public final class AppModel: ObservableObject {
 
     public func syncNow() async {
         await performExplicitSyncCycle()
+    }
+
+    public func syncFiles() async {
+        guard !isFileTransferRunning else { return }
+        isFileTransferRunning = true
+        defer { isFileTransferRunning = false }
+
+        httpClient.updateConfiguration(buildServerConfiguration())
+        coordinator.updatePreferences(syncEnabled: syncEnabled, showNotifications: showNotifications)
+        _ = await coordinator.transferClipboardFiles(
+            using: clipboardService,
+            maximumBytes: maximumTransferSizeBytes
+        )
+    }
+
+    @discardableResult
+    public func updateTransferShortcut(_ shortcut: GlobalShortcut?) async -> Bool {
+        guard shortcut != transferShortcut else { return true }
+        guard shortcutRegistrationHandler?(shortcut) != false else {
+            lastErrorText = "That global shortcut is already in use."
+            return false
+        }
+
+        let previous = transferShortcut
+        transferShortcut = shortcut
+        do {
+            var settings = persistedSettings
+            settings.transferShortcut = shortcut
+            try settingsStore.save(settings)
+            persistedSettings = settings
+            lastErrorText = ""
+            return true
+        } catch {
+            _ = shortcutRegistrationHandler?(previous)
+            transferShortcut = previous
+            lastErrorText = error.localizedDescription
+            return false
+        }
+    }
+
+    public func reportShortcutRegistrationFailure() {
+        lastErrorText = "The configured global shortcut is already in use. Use the menu or choose another shortcut."
+    }
+
+    public static var maximumTransferSizeMiBLimit: Int {
+        Int(maximumTransferSizeLimitBytes / 1_024 / 1_024)
+    }
+
+    private var maximumTransferSizeBytes: Int64 {
+        Int64(min(max(1, maximumTransferSizeMiB), Self.maximumTransferSizeMiBLimit)) * 1_024 * 1_024
+    }
+
+    private func currentSettings() -> AppSettings {
+        AppSettings(
+            serverURL: serverURL.trimmingCharacters(in: .whitespacesAndNewlines),
+            username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+            keychainAccount: "primary",
+            syncEnabled: syncEnabled,
+            launchAtLogin: launchAtLogin,
+            showNotifications: showNotifications,
+            showDockIcon: showDockIcon,
+            receiveMode: receiveMode,
+            pollingIntervalSeconds: pollingIntervalSeconds,
+            autoReconnect: autoReconnect,
+            maximumTransferSizeBytes: maximumTransferSizeBytes,
+            transferShortcut: transferShortcut
+        )
     }
 
     private func performExplicitSyncCycle() async {

@@ -31,6 +31,7 @@ struct SettingsView: View {
             statusSection
             serverSection
             behaviorSection
+            fileTransferSection
             receiveModeSection
             reconnectSection
         }
@@ -209,6 +210,34 @@ struct SettingsView: View {
             }
         }
         .animation(.snappy(duration: 0.25), value: appModel.receiveMode)
+    }
+
+    private var fileTransferSection: some View {
+        Section {
+            LabeledContent("Global Shortcut") {
+                ShortcutRecorder(shortcut: appModel.transferShortcut) { shortcut in
+                    Task { await appModel.updateTransferShortcut(shortcut) }
+                }
+                .frame(width: 150, height: 26)
+            }
+
+            TextField("Maximum Transfer Size (MiB)", value: $appModel.maximumTransferSizeMiB, format: .number)
+                .onChange(of: appModel.maximumTransferSizeMiB) { value in
+                    guard value > 0 else {
+                        appModel.maximumTransferSizeMiB = 1
+                        return
+                    }
+                    guard value <= AppModel.maximumTransferSizeMiBLimit else {
+                        appModel.maximumTransferSizeMiB = AppModel.maximumTransferSizeMiBLimit
+                        return
+                    }
+                    Task { await appModel.persistSettings() }
+                }
+        } header: {
+            Text("Images and Files")
+        } footer: {
+            Text("Images and files transfer only on request. Maximum: \(AppModel.maximumTransferSizeMiBLimit) MiB. Downloads are saved to ~/Downloads/SyncClipboard.")
+        }
     }
 
     private var reconnectSection: some View {

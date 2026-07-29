@@ -67,7 +67,7 @@ swift run SyncClipboard-Swift
 open SyncClipboard-Swift.xcodeproj
 ```
 
-Package a local `.app` bundle:
+Package a local `.app` bundle after a full development cycle:
 
 ```bash
 zsh build/macos/package_app.sh

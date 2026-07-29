@@ -3,6 +3,7 @@ import Foundation
 
 @MainActor
 public protocol ClipboardServicing: AnyObject {
+    func readFileURLs() -> [URL]
     func readCurrentSnapshot() throws -> ClipboardSnapshot?
     func write(_ snapshot: ClipboardSnapshot) throws
 }
@@ -11,8 +12,19 @@ public protocol ClipboardServicing: AnyObject {
 public final class ClipboardService: ClipboardServicing {
     public init() {}
 
+    public func readFileURLs() -> [URL] {
+        NSPasteboard.general.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] ?? []
+    }
+
     public func readCurrentSnapshot() throws -> ClipboardSnapshot? {
         let pasteboard = NSPasteboard.general
+
+        guard readFileURLs().isEmpty else {
+            return nil
+        }
 
         if let imageData = extractImage(from: pasteboard) {
             return .image(pngData: imageData)

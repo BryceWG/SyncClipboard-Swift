@@ -43,6 +43,12 @@ private final class RequestLog: @unchecked Sendable {
         lock.unlock()
     }
 
+    func clear() {
+        lock.lock()
+        entries.removeAll()
+        lock.unlock()
+    }
+
     var snapshot: [String] {
         lock.lock()
         defer { lock.unlock() }
@@ -54,6 +60,11 @@ private final class RequestLog: @unchecked Sendable {
 private final class FakeClipboardService: ClipboardServicing {
     private(set) var writtenSnapshots: [ClipboardSnapshot] = []
     var nextSnapshot: ClipboardSnapshot?
+    var fileURLs: [URL] = []
+
+    func readFileURLs() -> [URL] {
+        fileURLs
+    }
 
     func readCurrentSnapshot() throws -> ClipboardSnapshot? {
         nextSnapshot
@@ -187,6 +198,91 @@ final class SyncClipboardTests: XCTestCase {
         XCTAssertEqual(snapshot.profileDTO.type, .image)
     }
 
+    func testStreamingFileHashMatchesInMemoryHash() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fileURL = directory.appendingPathComponent("payload.bin")
+        let data = Data((0 ..< 255).map(UInt8.init))
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try data.write(to: fileURL)
+
+        XCTAssertEqual(
+            try Hashing.fileProfileHash(fileName: fileURL.lastPathComponent, fileURL: fileURL),
+            Hashing.fileProfileHash(fileName: fileURL.lastPathComponent, fileData: data)
+        )
+    }
+
+    func testMultipleFilesAreArchivedAndTransferLimitIsEnforced() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let first = directory.appendingPathComponent("first.txt")
+        let second = directory.appendingPathComponent("second.txt")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("first".utf8).write(to: first)
+        try Data("second".utf8).write(to: second)
+
+        let prepared = try await FileTransfer.prepareUpload(urls: [first, second], maximumBytes: 1_024 * 1_024)
+        defer { prepared.cleanup() }
+        XCTAssertEqual(prepared.url.pathExtension, "zip")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.url.path))
+
+        do {
+            _ = try await FileTransfer.prepareUpload(urls: [first, second], maximumBytes: 5)
+            XCTFail("Expected the source-size limit to reject the selection")
+        } catch let error as SyncClipboardError {
+            guard case .transferTooLarge(5) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testArchivedFoldersExcludeSymbolicLinks() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("source")
+        let secret = root.appendingPathComponent("secret.txt")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("secret".utf8).write(to: secret)
+        try FileManager.default.createSymbolicLink(
+            at: source.appendingPathComponent("secret-link"),
+            withDestinationURL: secret
+        )
+
+        let prepared = try await FileTransfer.prepareUpload(urls: [source], maximumBytes: 1_024 * 1_024)
+        defer { prepared.cleanup() }
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        process.arguments = ["-Z1", prepared.url.path]
+        process.standardOutput = output
+        try process.run()
+        process.waitUntilExit()
+        let entries = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertFalse(entries.contains("secret-link"))
+        XCTAssertFalse(entries.contains("secret.txt"))
+    }
+
+    func testDownloadedFilesUseSafeUniqueNames() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let downloads = root.appendingPathComponent("Downloads")
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("existing".utf8).write(to: downloads.appendingPathComponent("report.pdf"))
+        let temporary = root.appendingPathComponent("incoming")
+        try Data("new".utf8).write(to: temporary)
+
+        let saved = try await FileTransfer.saveDownloadedFile(
+            temporary,
+            suggestedName: "../report.pdf",
+            downloadsDirectory: downloads
+        )
+
+        XCTAssertEqual(saved.lastPathComponent, "report (1).pdf")
+        XCTAssertEqual(try Data(contentsOf: saved), Data("new".utf8))
+    }
+
     func testProfileDTOEncodesUsingServerFieldNames() throws {
         let dto = ProfileDTO(
             type: .text,
@@ -302,6 +398,8 @@ final class SyncClipboardTests: XCTestCase {
         XCTAssertEqual(settings.receiveMode, .realtime)
         XCTAssertEqual(settings.pollingIntervalSeconds, 1.0)
         XCTAssertTrue(settings.autoReconnect)
+        XCTAssertEqual(settings.maximumTransferSizeBytes, defaultMaximumTransferSizeBytes)
+        XCTAssertEqual(settings.transferShortcut, .defaultTransfer)
     }
 
     func testAppSettingsDecodePreservesLegacyRealtimeTransportChoices() throws {
@@ -367,6 +465,18 @@ final class SyncClipboardTests: XCTestCase {
 
         XCTAssertEqual(tooSmallSettings.pollingIntervalSeconds, 0.5)
         XCTAssertEqual(tooLargeSettings.pollingIntervalSeconds, 60.0)
+    }
+
+    func testAppSettingsClampTransferLimitToServerCompatibleMaximum() throws {
+        let data = """
+        {
+          "maximumTransferSizeBytes": 9223372036854775807
+        }
+        """.data(using: .utf8)!
+
+        let settings = try JSONDecoder().decode(AppSettings.self, from: data)
+
+        XCTAssertEqual(settings.maximumTransferSizeBytes, maximumTransferSizeLimitBytes)
     }
 
     @MainActor
@@ -548,6 +658,136 @@ final class SyncClipboardTests: XCTestCase {
             latestDiagnostics.lastError,
             SyncClipboardError.unexpectedResponse(404).localizedDescription
         )
+    }
+
+    @MainActor
+    func testAutomaticSyncIgnoresImagesAndFiles() async {
+        let log = RequestLog()
+        let httpClient = SyncClipboardHTTPClient(session: makeMockSession())
+        let coordinator = SyncCoordinator(httpClient: httpClient, notifier: UserNotifier())
+        let clipboardService = FakeClipboardService()
+        clipboardService.nextSnapshot = .image(pngData: Data([1, 2, 3]))
+        coordinator.updatePreferences(syncEnabled: true, showNotifications: false)
+
+        MockURLProtocol.requestHandler = { request in
+            log.append(request.url?.absoluteString ?? "request")
+            throw SyncClipboardError.unexpectedResponse(500)
+        }
+
+        await coordinator.handleLocalPasteboardChange(using: clipboardService)
+        let accepted = await coordinator.handleRemoteProfileChange(
+            ProfileDTO(type: .file, hash: "file", text: "archive.zip", hasData: true, dataName: "archive.zip", size: 10),
+            using: clipboardService
+        )
+
+        XCTAssertTrue(accepted)
+        XCTAssertTrue(log.snapshot.isEmpty)
+        XCTAssertTrue(clipboardService.writtenSnapshots.isEmpty)
+    }
+
+    @MainActor
+    func testManualImageSyncUsesLocalImageAndSkipsMatchingHash() async throws {
+        let log = RequestLog()
+        let httpClient = SyncClipboardHTTPClient(session: makeMockSession())
+        let coordinator = SyncCoordinator(httpClient: httpClient, notifier: UserNotifier())
+        let clipboardService = FakeClipboardService()
+        let local = ClipboardSnapshot.image(pngData: Data([1, 2, 3]))
+        clipboardService.nextSnapshot = local
+        coordinator.updatePreferences(syncEnabled: true, showNotifications: false)
+        httpClient.updateConfiguration(ServerConfiguration(
+            baseURL: URL(string: "https://example.com/sync/")!,
+            username: "alice",
+            password: "secret"
+        ))
+
+        let remote = ProfileDTO(type: .image, hash: "different", text: "remote.png", hasData: true, dataName: "remote.png", size: 3)
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+            log.append("\(request.httpMethod ?? "GET") \(url.path)")
+            if request.httpMethod == "GET" {
+                return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, try JSONEncoder().encode(remote))
+            }
+            return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data())
+        }
+
+        let uploaded = await coordinator.transferClipboardFiles(using: clipboardService, maximumBytes: 1_024)
+        XCTAssertTrue(uploaded)
+        XCTAssertEqual(log.snapshot, [
+            "GET /sync/SyncClipboard.json",
+            "PUT /sync/file/\(local.dataName!)",
+            "PUT /sync/SyncClipboard.json",
+        ])
+
+        log.clear()
+        let matchingRemote = ProfileDTO(type: .image, hash: local.hash, text: "remote.png", hasData: true, dataName: "remote.png", size: 3)
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+            log.append("\(request.httpMethod ?? "GET") \(url.path)")
+            return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, try JSONEncoder().encode(matchingRemote))
+        }
+        let skipped = await coordinator.transferClipboardFiles(using: clipboardService, maximumBytes: 1_024)
+        XCTAssertTrue(skipped)
+        XCTAssertEqual(log.snapshot, ["GET /sync/SyncClipboard.json"])
+    }
+
+    @MainActor
+    func testManualRemoteFileDownloadsToConfiguredDirectory() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let httpClient = SyncClipboardHTTPClient(session: makeMockSession())
+        let coordinator = SyncCoordinator(httpClient: httpClient, notifier: UserNotifier(), downloadsDirectory: root)
+        let clipboardService = FakeClipboardService()
+        let profile = ProfileDTO(
+            type: .file,
+            hash: "hash",
+            text: "report.pdf",
+            hasData: true,
+            dataName: "report.pdf",
+            size: 4
+        )
+        coordinator.updatePreferences(syncEnabled: true, showNotifications: false)
+        httpClient.updateConfiguration(ServerConfiguration(
+            baseURL: URL(string: "https://example.com/sync/")!,
+            username: "alice",
+            password: "secret"
+        ))
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+            let data = url.lastPathComponent == "SyncClipboard.json"
+                ? try JSONEncoder().encode(profile)
+                : Data("file".utf8)
+            return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }
+
+        let downloaded = await coordinator.transferClipboardFiles(using: clipboardService, maximumBytes: 1_024)
+        XCTAssertTrue(downloaded)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("report.pdf")), Data("file".utf8))
+    }
+
+    @MainActor
+    func testStreamingDownloadStopsWhenActualDataExceedsLimit() async throws {
+        let client = SyncClipboardHTTPClient(session: makeMockSession())
+        client.updateConfiguration(ServerConfiguration(
+            baseURL: URL(string: "https://example.com/sync/")!,
+            username: "alice",
+            password: "secret"
+        ))
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+            return (
+                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                Data(repeating: 1, count: 10)
+            )
+        }
+
+        do {
+            _ = try await client.downloadFile(named: "large.bin", maximumBytes: 4)
+            XCTFail("Expected the streamed byte limit to cancel the download")
+        } catch let error as SyncClipboardError {
+            guard case .transferTooLarge(4) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
     }
 
     @MainActor
@@ -779,6 +1019,34 @@ final class SyncClipboardTests: XCTestCase {
             AppModel.launchAtLoginIssueText(forRequestedState: true, status: .requiresApproval)
         )
         XCTAssertEqual(settingsStore.savedSettings.first?.launchAtLogin, false)
+    }
+
+    @MainActor
+    func testShortcutUpdatePersistsWithoutApplyingUnrelatedSettings() async {
+        let settingsStore = FakeSettingsStore()
+        let launchManager = FakeLaunchAtLoginManager(
+            status: .requiresApproval,
+            nextStatusAfterSet: .requiresApproval
+        )
+        let model = AppModel(
+            settingsStore: settingsStore,
+            keychainStore: FakeKeychainStore(),
+            httpClient: SyncClipboardHTTPClient(session: makeMockSession()),
+            clipboardService: FakeClipboardService(),
+            launchAtLoginManager: launchManager
+        )
+        model.shortcutRegistrationHandler = { _ in true }
+        model.serverURL = "https://unsaved.example"
+        model.username = "unsaved-user"
+        let shortcut = GlobalShortcut(keyCode: 8, modifiers: GlobalShortcut.command, displayKey: "C")
+
+        let succeeded = await model.updateTransferShortcut(shortcut)
+
+        XCTAssertTrue(succeeded)
+        XCTAssertEqual(settingsStore.savedSettings.last?.transferShortcut, shortcut)
+        XCTAssertEqual(settingsStore.savedSettings.last?.serverURL, "")
+        XCTAssertEqual(settingsStore.savedSettings.last?.username, "")
+        XCTAssertTrue(launchManager.requestedValues.isEmpty)
     }
 
     private func makeMockSession() -> URLSession {
