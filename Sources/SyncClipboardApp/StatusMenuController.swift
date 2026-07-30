@@ -112,7 +112,7 @@ final class StatusMenuController {
         for directory in ["tray", nil] {
             guard let url = bundle.url(forResource: name, withExtension: "png", subdirectory: directory),
                   let image = NSImage(contentsOf: url) else { continue }
-            let side = min(max(targetHeight - 6, 14), 18)
+            let side = min(max(targetHeight - 4, 14), 20)
             image.size = NSSize(width: side, height: side)
             image.isTemplate = isTemplate
             trayImages[name] = image
