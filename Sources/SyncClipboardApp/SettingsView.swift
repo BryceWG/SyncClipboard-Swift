@@ -261,6 +261,16 @@ struct SettingsView: View {
 
     private var fileTransferSection: some View {
         Section {
+            Toggle("Automatically Sync Images", isOn: $appModel.autoSyncImages)
+                .onChange(of: appModel.autoSyncImages) { _ in
+                    Task { await appModel.persistSettings() }
+                }
+
+            Toggle("Automatically Sync Files", isOn: $appModel.autoSyncFiles)
+                .onChange(of: appModel.autoSyncFiles) { _ in
+                    Task { await appModel.persistSettings() }
+                }
+
             HStack {
                 Text("Global Shortcut")
                 Spacer()
@@ -285,7 +295,7 @@ struct SettingsView: View {
         } header: {
             Text("Images and Files")
         } footer: {
-            Text("Images and files transfer only on request. Maximum: \(AppModel.maximumTransferSizeMiBLimit) MiB. Downloads are saved to ~/Downloads/SyncClipboard.")
+            Text("Text always syncs automatically. Images and files use the options above; manual sync remains available from the menu or global shortcut. Downloads are saved to ~/Downloads/SyncClipboard. Maximum: \(AppModel.maximumTransferSizeMiBLimit) MiB.")
         }
     }
 

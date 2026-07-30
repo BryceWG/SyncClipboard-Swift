@@ -75,6 +75,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var autoReconnect: Bool
     public var maximumTransferSizeBytes: Int64
     public var transferShortcut: GlobalShortcut?
+    public var autoSyncImages: Bool
+    public var autoSyncFiles: Bool
 
     public init(
         serverURL: String = "",
@@ -88,7 +90,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         pollingIntervalSeconds: Double = 1.0,
         autoReconnect: Bool = true,
         maximumTransferSizeBytes: Int64 = defaultMaximumTransferSizeBytes,
-        transferShortcut: GlobalShortcut? = .defaultTransfer
+        transferShortcut: GlobalShortcut? = .defaultTransfer,
+        autoSyncImages: Bool = false,
+        autoSyncFiles: Bool = false
     ) {
         self.serverURL = serverURL
         self.username = username
@@ -102,6 +106,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.autoReconnect = autoReconnect
         self.maximumTransferSizeBytes = min(max(1, maximumTransferSizeBytes), maximumTransferSizeLimitBytes)
         self.transferShortcut = transferShortcut
+        self.autoSyncImages = autoSyncImages
+        self.autoSyncFiles = autoSyncFiles
     }
 
     enum CodingKeys: String, CodingKey {
@@ -118,6 +124,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case realtimeTransportMode
         case maximumTransferSizeBytes
         case transferShortcut
+        case autoSyncImages
+        case autoSyncFiles
     }
 
     public init(from decoder: any Decoder) throws {
@@ -149,6 +157,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.transferShortcut = try container.contains(.transferShortcut)
             ? container.decodeIfPresent(GlobalShortcut.self, forKey: .transferShortcut)
             : .defaultTransfer
+        self.autoSyncImages = try container.decodeIfPresent(Bool.self, forKey: .autoSyncImages) ?? false
+        self.autoSyncFiles = try container.decodeIfPresent(Bool.self, forKey: .autoSyncFiles) ?? false
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -168,6 +178,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
             forKey: .maximumTransferSizeBytes
         )
         try container.encode(transferShortcut, forKey: .transferShortcut)
+        try container.encode(autoSyncImages, forKey: .autoSyncImages)
+        try container.encode(autoSyncFiles, forKey: .autoSyncFiles)
     }
 
     private static func clampedPollingInterval(_ value: Double) -> Double {
@@ -484,7 +496,7 @@ public struct ClipboardSnapshot: Equatable, Sendable {
             type: type,
             hash: hash,
             text: previewText,
-            hasData: transferData != nil,
+            hasData: dataName != nil,
             dataName: dataName,
             size: size
         )

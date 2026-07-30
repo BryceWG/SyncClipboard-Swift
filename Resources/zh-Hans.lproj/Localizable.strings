@@ -34,9 +34,11 @@
 "Auto Reconnect" = "自动重连";
 "Auto Retry" = "自动重试";
 "Images and Files" = "图片和文件";
+"Automatically Sync Images" = "自动同步图片";
+"Automatically Sync Files" = "自动同步文件";
 "Global Shortcut" = "全局快捷键";
 "Maximum Transfer Size (MiB)" = "最大传输大小 (MiB)";
-"Images and files transfer only on request. Maximum: %lld MiB. Downloads are saved to ~/Downloads/SyncClipboard." = "图片和文件仅在手动触发时传输。最大：%lld MiB。下载保存到 ~/Downloads/SyncClipboard。";
+"Text always syncs automatically. Images and files use the options above; manual sync remains available from the menu or global shortcut. Downloads are saved to ~/Downloads/SyncClipboard. Maximum: %lld MiB." = "文字始终自动同步；图片和文件由上方选项控制。手动同步仍可通过菜单或全局快捷键触发。下载保存到 ~/Downloads/SyncClipboard。最大：%lld MiB。";
 "Settings" = "设置";
 
 /* Connection status */

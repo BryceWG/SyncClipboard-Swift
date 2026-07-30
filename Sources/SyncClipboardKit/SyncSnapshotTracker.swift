@@ -60,4 +60,10 @@ public struct SyncSnapshotTracker: Sendable {
         lastLocalFingerprint = fingerprint
         suppressedFingerprint = fingerprint
     }
+
+    /// Records a remote fingerprint as handled without applying it to the
+    /// pasteboard, used by binary auto-pull where no text snapshot exists.
+    public mutating func markHandledRemote(fingerprint: String) {
+        lastAppliedRemoteFingerprint = fingerprint
+    }
 }

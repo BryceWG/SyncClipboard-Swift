@@ -91,6 +91,15 @@ public final class SyncClipboardHTTPClient {
 
     public func uploadFile(data: Data, name: String, mimeType: String) async throws {
         let configuration = try requireConfiguration()
+        try await uploadFile(data: data, name: name, mimeType: mimeType, configuration: configuration)
+    }
+
+    public func uploadFile(
+        data: Data,
+        name: String,
+        mimeType: String,
+        configuration: ServerConfiguration
+    ) async throws {
         let encodedName = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
         let request = Self.makeRequest(
             baseURL: configuration.baseURL,
@@ -105,6 +114,15 @@ public final class SyncClipboardHTTPClient {
 
     public func uploadFile(at fileURL: URL, name: String, mimeType: String) async throws {
         let configuration = try requireConfiguration()
+        try await uploadFile(at: fileURL, name: name, mimeType: mimeType, configuration: configuration)
+    }
+
+    public func uploadFile(
+        at fileURL: URL,
+        name: String,
+        mimeType: String,
+        configuration: ServerConfiguration
+    ) async throws {
         let encodedName = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
         let request = Self.makeRequest(
             baseURL: configuration.baseURL,

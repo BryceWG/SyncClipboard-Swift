@@ -63,7 +63,12 @@ public final class SyncCoordinator {
     private var diagnostics = SyncDiagnostics()
     private var syncEnabled = false
     private var showNotifications = true
+    private var autoSyncImages = false
+    private var autoSyncFiles = false
+    private var maximumBytes: Int64 = defaultMaximumTransferSizeBytes
     private var inFlightRemoteFingerprint: String?
+    private var binaryTransferInFlight = false
+    private var binaryTransferWaiters: [CheckedContinuation<Void, Never>] = []
     private var lastPasteboardObservation: PasteboardObservation?
     private var imageProvenance: ImageProvenance?
     private var fileDownloadReceipt: FileDownloadReceipt?
@@ -79,9 +84,18 @@ public final class SyncCoordinator {
         self.downloadsDirectory = downloadsDirectory ?? FileTransfer.defaultDownloadsDirectory
     }
 
-    public func updatePreferences(syncEnabled: Bool, showNotifications: Bool) {
+    public func updatePreferences(
+        syncEnabled: Bool,
+        showNotifications: Bool,
+        autoSyncImages: Bool = false,
+        autoSyncFiles: Bool = false,
+        maximumBytes: Int64 = defaultMaximumTransferSizeBytes
+    ) {
         self.syncEnabled = syncEnabled
         self.showNotifications = showNotifications
+        self.autoSyncImages = autoSyncImages
+        self.autoSyncFiles = autoSyncFiles
+        self.maximumBytes = maximumBytes
         if syncEnabled && showNotifications {
             notifier.prepareAuthorization()
         }
@@ -105,21 +119,19 @@ public final class SyncCoordinator {
         }
 
         do {
-            let snapshot = try clipboardService.readCurrentSnapshot()
-            guard let snapshot else { return }
-            guard snapshot.type == .text else { return }
-            guard tracker.shouldUpload(snapshot) else { return }
-
-            if let transferData = snapshot.transferData, let dataName = snapshot.dataName {
-                let mimeType = snapshot.type == .image ? "image/png" : "text/plain; charset=utf-8"
-                try await httpClient.uploadFile(data: transferData, name: dataName, mimeType: mimeType)
+            if autoSyncFiles, !clipboardService.readFileURLs().isEmpty {
+                try await uploadLocalFiles(using: clipboardService, observedAt: observedAt)
+                return
             }
 
-            try await httpClient.setCurrentProfile(snapshot.profileDTO)
-            tracker.markUploaded(snapshot)
-            diagnostics.lastPushAt = Date()
-            diagnostics.lastError = nil
-            diagnosticsHandler?(diagnostics)
+            let snapshot = try clipboardService.readCurrentSnapshot()
+            guard let snapshot else { return }
+            guard snapshot.type == .text || (snapshot.type == .image && autoSyncImages) else { return }
+            if snapshot.type == .image {
+                try await uploadLocalImage(snapshot)
+                return
+            }
+            try await uploadSnapshot(snapshot, mimeType: "text/plain; charset=utf-8")
         } catch {
             diagnostics.lastError = error.localizedDescription
             diagnosticsHandler?(diagnostics)
@@ -144,7 +156,22 @@ public final class SyncCoordinator {
     @discardableResult
     public func handleRemoteProfileChange(_ profile: ProfileDTO, using clipboardService: any ClipboardServicing) async -> Bool {
         guard syncEnabled else { return false }
-        guard profile.type == .text else { return true }
+        switch profile.type {
+        case .text:
+            return await handleRemoteClipboardProfile(profile, using: clipboardService)
+        case .image where autoSyncImages:
+            return await handleRemoteBinaryProfile(profile, using: clipboardService)
+        case .file where autoSyncFiles, .group where autoSyncFiles:
+            return await handleRemoteBinaryProfile(profile, using: clipboardService)
+        default:
+            return true
+        }
+    }
+
+    private func handleRemoteClipboardProfile(
+        _ profile: ProfileDTO,
+        using clipboardService: any ClipboardServicing
+    ) async -> Bool {
         let fingerprint = profile.fingerprint
 
         guard beginRemoteHandlingIfNeeded(fingerprint: fingerprint) else {
@@ -182,12 +209,175 @@ public final class SyncCoordinator {
         }
     }
 
+    private func handleRemoteBinaryProfile(
+        _ profile: ProfileDTO,
+        using clipboardService: any ClipboardServicing
+    ) async -> Bool {
+        let fingerprint = profile.fingerprint
+        guard beginRemoteHandlingIfNeeded(fingerprint: fingerprint) else {
+            return true
+        }
+        defer { finishRemoteHandling(fingerprint: fingerprint) }
+        let requestedConfiguration = httpClient.configuration
+        await acquireBinaryTransfer()
+        defer { releaseBinaryTransfer() }
+
+        do {
+            guard tracker.shouldFetchRemote(fingerprint: fingerprint) else { return true }
+            guard let configuration = requestedConfiguration else {
+                throw SyncClipboardError.missingServerConfiguration
+            }
+            guard httpClient.configuration == configuration else {
+                throw SyncClipboardError.serverConfigurationChanged
+            }
+            guard profile.hasData, let dataName = profile.dataName else {
+                throw SyncClipboardError.missingTransferData(profile.type)
+            }
+            guard profile.size >= 0, profile.size <= maximumBytes else {
+                throw SyncClipboardError.transferTooLarge(maximumBytes)
+            }
+            let temporaryURL = try await httpClient.downloadFile(named: dataName, maximumBytes: maximumBytes)
+            defer { try? FileManager.default.removeItem(at: temporaryURL) }
+            guard httpClient.configuration == configuration else {
+                throw SyncClipboardError.serverConfigurationChanged
+            }
+
+            if profile.type == .group {
+                try await FileTransfer.validateZIP(at: temporaryURL)
+            } else {
+                let hash = try await Task.detached {
+                    try Hashing.fileProfileHash(fileName: dataName, fileURL: temporaryURL)
+                }.value
+                guard profile.hash.isEmpty || hash == profile.hash.uppercased() else {
+                    throw SyncClipboardError.historyDownloadHashMismatch
+                }
+            }
+
+            if profile.type == .image {
+                let data = try await Task.detached { try Data(contentsOf: temporaryURL) }.value
+                let snapshot = try ClipboardSnapshot.fromRemote(dto: profile, transferData: data)
+                try clipboardService.write(snapshot)
+                tracker.markAppliedRemote(.image(pngData: data))
+                tracker.markHandledRemote(fingerprint: fingerprint)
+                diagnostics.lastPullAt = Date()
+                diagnostics.lastError = nil
+                diagnosticsHandler?(diagnostics)
+                if showNotifications {
+                    notifier.notify(title: NSLocalizedString("Clipboard Updated", bundle: .main, comment: "Notification title"), body: snapshot.previewText)
+                }
+            } else {
+                let destination = try await FileTransfer.saveDownloadedFile(
+                    temporaryURL,
+                    suggestedName: dataName,
+                    downloadsDirectory: downloadsDirectory
+                )
+                guard httpClient.configuration == configuration else {
+                    try? FileManager.default.removeItem(at: destination)
+                    throw SyncClipboardError.serverConfigurationChanged
+                }
+                tracker.markHandledRemote(fingerprint: fingerprint)
+                completeBinaryTransfer(push: false, message: destination.path)
+            }
+            return true
+        } catch {
+            diagnostics.lastError = error.localizedDescription
+            diagnosticsHandler?(diagnostics)
+            if showNotifications {
+                notifier.notify(title: NSLocalizedString("File Sync Failed", bundle: .main, comment: "Notification title"), body: error.localizedDescription)
+            }
+            return false
+        }
+    }
+
+    private func uploadLocalFiles(
+        using clipboardService: any ClipboardServicing,
+        observedAt: Date
+    ) async throws {
+        await acquireBinaryTransfer()
+        defer { releaseBinaryTransfer() }
+
+        let prepared = try await FileTransfer.prepareUpload(
+            urls: clipboardService.readFileURLs(),
+            maximumBytes: maximumBytes,
+            observationDate: observedAt
+        )
+        defer { prepared.cleanup() }
+        let hash = try await Task.detached {
+            try Hashing.fileProfileHash(fileName: prepared.name, fileURL: prepared.url)
+        }.value
+        let snapshot = ClipboardSnapshot(
+            type: .file,
+            hash: hash,
+            previewText: prepared.name,
+            inlineText: nil,
+            transferData: nil,
+            dataName: prepared.name,
+            size: prepared.size
+        )
+        guard tracker.shouldUpload(snapshot) else { return }
+        guard let configuration = httpClient.configuration else {
+            throw SyncClipboardError.missingServerConfiguration
+        }
+
+        try await httpClient.uploadFile(
+            at: prepared.url,
+            name: prepared.name,
+            mimeType: prepared.name.lowercased().hasSuffix(".zip") ? "application/zip" : "application/octet-stream",
+            configuration: configuration
+        )
+        try await publishUploadedSnapshot(snapshot, configuration: configuration)
+    }
+
+    private func uploadLocalImage(_ snapshot: ClipboardSnapshot) async throws {
+        guard snapshot.size <= maximumBytes else {
+            throw SyncClipboardError.transferTooLarge(maximumBytes)
+        }
+        await acquireBinaryTransfer()
+        defer { releaseBinaryTransfer() }
+        try await uploadSnapshot(snapshot, mimeType: "image/png")
+    }
+
+    private func uploadSnapshot(_ snapshot: ClipboardSnapshot, mimeType: String) async throws {
+        guard tracker.shouldUpload(snapshot) else { return }
+        guard let configuration = httpClient.configuration else {
+            throw SyncClipboardError.missingServerConfiguration
+        }
+        if let transferData = snapshot.transferData, let dataName = snapshot.dataName {
+            try await httpClient.uploadFile(
+                data: transferData,
+                name: dataName,
+                mimeType: mimeType,
+                configuration: configuration
+            )
+        }
+        try await publishUploadedSnapshot(snapshot, configuration: configuration)
+    }
+
+    private func publishUploadedSnapshot(
+        _ snapshot: ClipboardSnapshot,
+        configuration: ServerConfiguration
+    ) async throws {
+        guard httpClient.configuration == configuration else {
+            throw SyncClipboardError.serverConfigurationChanged
+        }
+        try await httpClient.setCurrentProfile(snapshot.profileDTO, configuration: configuration)
+        guard httpClient.configuration == configuration else {
+            throw SyncClipboardError.serverConfigurationChanged
+        }
+        tracker.markUploaded(snapshot)
+        diagnostics.lastPushAt = Date()
+        diagnostics.lastError = nil
+        diagnosticsHandler?(diagnostics)
+    }
+
     @discardableResult
     public func transferClipboardFiles(
         using clipboardService: any ClipboardServicing,
         maximumBytes: Int64
     ) async -> Bool {
         guard syncEnabled else { return false }
+        await acquireBinaryTransfer()
+        defer { releaseBinaryTransfer() }
 
         do {
             guard let configuration = httpClient.configuration else {
@@ -226,9 +416,8 @@ public final class SyncCoordinator {
 
             let remoteID = try remote.profileID
             if remoteID == local?.profileID {
-                try await publishCurrentProfile(remote, configuration: configuration)
                 if uploaded, case .upload(let candidate) = local {
-                    completeManualTransfer(push: true, message: candidate.prepared.name)
+                    completeBinaryTransfer(push: true, message: candidate.prepared.name)
                 } else {
                     notifyManualSkip(NSLocalizedString("The latest image or file is already local.", bundle: .main, comment: "Manual transfer skip message"))
                 }
@@ -445,12 +634,14 @@ public final class SyncCoordinator {
                     transferData: data
                 )
                 try clipboardService.write(snapshot)
+                tracker.markAppliedRemote(.image(pngData: data))
+                tracker.markHandledRemote(fingerprint: snapshot.fingerprint)
                 imageProvenance = ImageProvenance(
                     serverIdentity: identity,
                     profileID: profileID,
                     changeCount: clipboardService.changeCount
                 )
-                completeManualTransfer(push: false, message: name)
+                completeBinaryTransfer(push: false, message: name)
             } else {
                 let destination = try await FileTransfer.saveDownloadedFile(
                     temporaryURL,
@@ -461,47 +652,20 @@ public final class SyncCoordinator {
                     try? FileManager.default.removeItem(at: destination)
                     throw SyncClipboardError.serverConfigurationChanged
                 }
+                tracker.markHandledRemote(
+                    fingerprint: ProfileDTO(type: remote.type, hash: remote.normalizedHash).fingerprint
+                )
                 fileDownloadReceipt = FileDownloadReceipt(
                     serverIdentity: identity,
                     profileID: profileID,
                     destination: destination
                 )
-                completeManualTransfer(push: false, message: destination.path)
+                completeBinaryTransfer(push: false, message: destination.path)
             }
             return true
         }
 
         throw SyncClipboardError.historyChangedDuringTransfer
-    }
-
-    private func publishCurrentProfile(
-        _ record: HistoryRecordDTO,
-        configuration: ServerConfiguration
-    ) async throws {
-        guard httpClient.configuration == configuration else {
-            throw SyncClipboardError.serverConfigurationChanged
-        }
-        let current = try await httpClient.fetchCurrentProfile(configuration: configuration)
-        guard httpClient.configuration == configuration else {
-            throw SyncClipboardError.serverConfigurationChanged
-        }
-        guard current.type != record.type || current.hash.uppercased() != record.normalizedHash else {
-            return
-        }
-        try await httpClient.setCurrentProfile(
-            ProfileDTO(
-                type: record.type,
-                hash: record.normalizedHash,
-                text: record.text,
-                hasData: record.hasData,
-                dataName: record.hasData ? record.text : nil,
-                size: record.size
-            ),
-            configuration: configuration
-        )
-        guard httpClient.configuration == configuration else {
-            throw SyncClipboardError.serverConfigurationChanged
-        }
     }
 
     private func downloadedName(for record: HistoryRecordDTO, suggestedName: String?) throws -> String {
@@ -522,7 +686,23 @@ public final class SyncCoordinator {
         "\(configuration.baseURL.absoluteString)|\(configuration.username)"
     }
 
-    private func completeManualTransfer(push: Bool, message: String) {
+    private func acquireBinaryTransfer() async {
+        guard binaryTransferInFlight else {
+            binaryTransferInFlight = true
+            return
+        }
+        await withCheckedContinuation { binaryTransferWaiters.append($0) }
+    }
+
+    private func releaseBinaryTransfer() {
+        guard !binaryTransferWaiters.isEmpty else {
+            binaryTransferInFlight = false
+            return
+        }
+        binaryTransferWaiters.removeFirst().resume()
+    }
+
+    private func completeBinaryTransfer(push: Bool, message: String) {
         if push {
             diagnostics.lastPushAt = Date()
         } else {

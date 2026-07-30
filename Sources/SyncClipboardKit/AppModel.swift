@@ -19,6 +19,8 @@ public final class AppModel: ObservableObject {
     @Published public var pollingIntervalSeconds: Double
     @Published public var autoReconnect: Bool
     @Published public var maximumTransferSizeMiB: Int
+    @Published public var autoSyncImages: Bool
+    @Published public var autoSyncFiles: Bool
     @Published public private(set) var transferShortcut: GlobalShortcut?
     @Published public private(set) var isFileTransferRunning = false
     @Published public private(set) var connectionStatusText = "Disconnected"
@@ -73,6 +75,8 @@ public final class AppModel: ObservableObject {
         self.autoReconnect = loadedSettings.autoReconnect
         self.maximumTransferSizeMiB = max(1, Int(loadedSettings.maximumTransferSizeBytes / 1_024 / 1_024))
         self.transferShortcut = loadedSettings.transferShortcut
+        self.autoSyncImages = loadedSettings.autoSyncImages
+        self.autoSyncFiles = loadedSettings.autoSyncFiles
         self.persistedSettings = loadedSettings
 
         let notifier = UserNotifier()
@@ -184,7 +188,13 @@ public final class AppModel: ObservableObject {
         defer { isFileTransferRunning = false }
 
         httpClient.updateConfiguration(buildServerConfiguration())
-        coordinator.updatePreferences(syncEnabled: syncEnabled, showNotifications: showNotifications)
+        coordinator.updatePreferences(
+            syncEnabled: syncEnabled,
+            showNotifications: showNotifications,
+            autoSyncImages: autoSyncImages,
+            autoSyncFiles: autoSyncFiles,
+            maximumBytes: maximumTransferSizeBytes
+        )
         _ = await coordinator.transferClipboardFiles(
             using: clipboardService,
             maximumBytes: maximumTransferSizeBytes
@@ -241,13 +251,21 @@ public final class AppModel: ObservableObject {
             pollingIntervalSeconds: pollingIntervalSeconds,
             autoReconnect: autoReconnect,
             maximumTransferSizeBytes: maximumTransferSizeBytes,
-            transferShortcut: transferShortcut
+            transferShortcut: transferShortcut,
+            autoSyncImages: autoSyncImages,
+            autoSyncFiles: autoSyncFiles
         )
     }
 
     private func performExplicitSyncCycle() async {
         httpClient.updateConfiguration(buildServerConfiguration())
-        coordinator.updatePreferences(syncEnabled: syncEnabled, showNotifications: showNotifications)
+        coordinator.updatePreferences(
+            syncEnabled: syncEnabled,
+            showNotifications: showNotifications,
+            autoSyncImages: autoSyncImages,
+            autoSyncFiles: autoSyncFiles,
+            maximumBytes: maximumTransferSizeBytes
+        )
         await coordinator.handleLocalPasteboardChange(using: clipboardService)
         switch receiveMode {
         case .realtime:
@@ -303,7 +321,13 @@ public final class AppModel: ObservableObject {
     private func applyRuntimeConfiguration(forceRefresh: Bool) async {
         let configuration = buildServerConfiguration()
         httpClient.updateConfiguration(configuration)
-        coordinator.updatePreferences(syncEnabled: syncEnabled, showNotifications: showNotifications)
+        coordinator.updatePreferences(
+            syncEnabled: syncEnabled,
+            showNotifications: showNotifications,
+            autoSyncImages: autoSyncImages,
+            autoSyncFiles: autoSyncFiles,
+            maximumBytes: maximumTransferSizeBytes
+        )
         updateClipboardMonitoring()
 
         guard let configuration, syncEnabled else {

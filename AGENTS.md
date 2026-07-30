@@ -23,6 +23,7 @@ Keep:
 - connection test
 - realtime clipboard sync against the official SyncClipboard server
 - automatic text sync
+- independently configurable automatic image and file sync (both off by default)
 - manual image / file sync through the server history API
   (`Sync Images/Files` menu action and its configurable global shortcut)
 - simple menu bar status UI
@@ -101,8 +102,9 @@ Important:
 ### Core Layer
 
 - `AppModel` is the central state container used by the UI
-- `SyncCoordinator` owns upload / download decisions: automatic text sync plus
-  the history-driven manual image/file transfer
+- `SyncCoordinator` owns upload / download decisions: automatic text sync,
+  optional automatic image/file sync, plus the history-driven manual
+  image/file transfer
 - `ClipboardService` reads and writes the macOS pasteboard; `ClipboardMonitor`
   polls `changeCount` and records observation times for manual-sync event dating
 - `SyncSnapshotTracker` suppresses immediate upload/download echo loops
@@ -134,8 +136,8 @@ History details:
 - multi-file selections are zipped and uploaded as `File` records (not `Group`)
 - the client does not subscribe to `RemoteHistoryChanged`; it re-queries the
   server on every manual action
-- automatic text sync never calls the history API; manual binary sync never
-  writes `/SyncClipboard.json`
+- automatic text/image/file sync uses `/SyncClipboard.json` and `/file`; manual
+  binary sync uses only the history API
 
 SignalR details:
 
@@ -185,3 +187,9 @@ These are known non-blocking gaps at the current stage:
     configuration changes mid-task discard the result
   - an active (non-deleted) history record without data aborts manual sync
     instead of being skipped; the user must delete the broken record server-side
+- automatic image and file sync have independent settings and use the current
+  profile plus `/file/{dataName}`, like long text payloads
+- automatic file downloads are saved to `~/Downloads/SyncClipboard`; automatic
+  image downloads are written to the clipboard
+- manual `Sync Images/Files` remains available regardless of those settings and
+  does not publish its history-only payload through `/SyncClipboard.json`
