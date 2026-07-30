@@ -997,8 +997,14 @@ final class SyncClipboardTests: XCTestCase {
     func testManualRemoteFileDownloadsToConfiguredDirectory() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
+        let stateFileURL = root.appendingPathComponent("BinarySyncState.json")
         let httpClient = SyncClipboardHTTPClient(session: makeMockSession())
-        let coordinator = SyncCoordinator(httpClient: httpClient, notifier: UserNotifier(), downloadsDirectory: root)
+        var coordinator = SyncCoordinator(
+            httpClient: httpClient,
+            notifier: UserNotifier(),
+            downloadsDirectory: root,
+            stateFileURL: stateFileURL
+        )
         let clipboardService = FakeClipboardService()
         let log = RequestLog()
         clipboardService.nextSnapshot = .text("local text remains in the clipboard")
@@ -1040,6 +1046,13 @@ final class SyncClipboardTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("report.pdf")), Data("file".utf8))
 
         log.clear()
+        coordinator = SyncCoordinator(
+            httpClient: httpClient,
+            notifier: UserNotifier(),
+            downloadsDirectory: root,
+            stateFileURL: stateFileURL
+        )
+        coordinator.updatePreferences(syncEnabled: true, showNotifications: false, autoSyncFiles: true)
         let currentProfile = ProfileDTO(
             type: profile.type,
             hash: profile.normalizedHash,
@@ -1281,6 +1294,49 @@ final class SyncClipboardTests: XCTestCase {
         XCTAssertEqual(log.snapshot, ["GET /sync/file/report.txt"])
         XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(name)), payload)
         XCTAssertTrue(clipboardService.writtenSnapshots.isEmpty)
+    }
+
+    @MainActor
+    func testBinaryStateWriteFailureRemainsVisibleAfterSuccessfulManualSkip() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let stateFileURL = root.appendingPathComponent("state-as-directory")
+        try FileManager.default.createDirectory(at: stateFileURL, withIntermediateDirectories: true)
+        let local = ClipboardSnapshot.image(pngData: Data([1, 2, 3]))
+        let history = makeHistoryRecord(
+            type: .image,
+            hash: local.hash,
+            text: try XCTUnwrap(local.dataName),
+            size: local.size
+        )
+        let httpClient = SyncClipboardHTTPClient(session: makeMockSession())
+        let coordinator = SyncCoordinator(
+            httpClient: httpClient,
+            notifier: UserNotifier(),
+            stateFileURL: stateFileURL
+        )
+        let clipboardService = FakeClipboardService()
+        clipboardService.nextSnapshot = local
+        var diagnostics = SyncDiagnostics()
+        coordinator.diagnosticsHandler = { diagnostics = $0 }
+        coordinator.updatePreferences(syncEnabled: true, showNotifications: false)
+        httpClient.updateConfiguration(ServerConfiguration(
+            baseURL: URL(string: "https://example.com/sync/")!,
+            username: "alice",
+            password: "secret"
+        ))
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+            let data = url.path.hasSuffix("/query")
+                ? try JSONEncoder().encode([history])
+                : try JSONEncoder().encode(history)
+            return (HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!, data)
+        }
+
+        let succeeded = await coordinator.transferClipboardFiles(using: clipboardService, maximumBytes: 1_024)
+
+        XCTAssertTrue(succeeded)
+        XCTAssertFalse(diagnostics.lastError?.isEmpty ?? true)
     }
 
     @MainActor
@@ -1553,6 +1609,9 @@ final class SyncClipboardTests: XCTestCase {
 
     @MainActor
     func testDownloadedImageProvenancePreventsFalseReupload() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let stateFileURL = root.appendingPathComponent("BinarySyncState.json")
         let bytes = Data([1, 2, 3])
         let remote = makeHistoryRecord(
             type: .image,
@@ -1563,7 +1622,11 @@ final class SyncClipboardTests: XCTestCase {
         let profileID = try remote.profileID
         let log = RequestLog()
         let httpClient = SyncClipboardHTTPClient(session: makeMockSession())
-        let coordinator = SyncCoordinator(httpClient: httpClient, notifier: UserNotifier())
+        var coordinator = SyncCoordinator(
+            httpClient: httpClient,
+            notifier: UserNotifier(),
+            stateFileURL: stateFileURL
+        )
         let clipboardService = FakeClipboardService()
         coordinator.updatePreferences(syncEnabled: true, showNotifications: false, autoSyncImages: true)
         httpClient.updateConfiguration(ServerConfiguration(
@@ -1603,12 +1666,69 @@ final class SyncClipboardTests: XCTestCase {
 
         let first = await coordinator.transferClipboardFiles(using: clipboardService, maximumBytes: 1_024)
         XCTAssertTrue(first)
-        clipboardService.nextSnapshot = .image(pngData: bytes)
-        log.clear()
 
-        await coordinator.handleLocalPasteboardChange(using: clipboardService)
+        let otherBytes = Data([4, 5, 6])
+        let otherRemote = makeHistoryRecord(
+            type: .image,
+            hash: Hashing.fileProfileHash(fileName: "other.png", fileData: otherBytes),
+            text: "other.png",
+            size: 3
+        )
+        let otherProfileID = try otherRemote.profileID
+        httpClient.updateConfiguration(ServerConfiguration(
+            baseURL: URL(string: "https://other.example.com/sync/")!,
+            username: "alice",
+            password: "secret"
+        ))
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+            if url.path.hasSuffix("/query") {
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    try JSONEncoder().encode([otherRemote])
+                )
+            }
+            XCTAssertEqual(url.path, "/sync/api/history/\(otherProfileID)/data")
+            return (
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Disposition": "attachment; filename=other.png"]
+                )!,
+                otherBytes
+            )
+        }
+        let otherDownloaded = await coordinator.transferClipboardFiles(using: clipboardService, maximumBytes: 1_024)
+        XCTAssertTrue(otherDownloaded)
+
+        clipboardService.nextSnapshot = .image(pngData: otherBytes)
+        log.clear()
+        coordinator = SyncCoordinator(
+            httpClient: httpClient,
+            notifier: UserNotifier(),
+            stateFileURL: stateFileURL
+        )
+        coordinator.updatePreferences(syncEnabled: true, showNotifications: false, autoSyncImages: true)
+
+        await coordinator.handleLocalPasteboardChange(
+            using: clipboardService,
+            changeCount: clipboardService.changeCount
+        )
         XCTAssertTrue(log.snapshot.isEmpty)
 
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+            log.append("\(request.httpMethod ?? "GET") \(url.path)")
+            if url.path.hasSuffix("/query") {
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    try JSONEncoder().encode([otherRemote])
+                )
+            }
+            XCTFail("Current server image should remain known after filtering stale provenance")
+            return (HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!, Data())
+        }
         let second = await coordinator.transferClipboardFiles(using: clipboardService, maximumBytes: 1_024)
         XCTAssertTrue(second)
         XCTAssertEqual(log.snapshot, ["POST /sync/api/history/query"])
@@ -1722,9 +1842,15 @@ final class SyncClipboardTests: XCTestCase {
     func testFileDownloadReceiptSkipsRepeatDownload() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
+        let stateFileURL = root.appendingPathComponent("BinarySyncState.json")
         let log = RequestLog()
         let httpClient = SyncClipboardHTTPClient(session: makeMockSession())
-        let coordinator = SyncCoordinator(httpClient: httpClient, notifier: UserNotifier(), downloadsDirectory: root)
+        var coordinator = SyncCoordinator(
+            httpClient: httpClient,
+            notifier: UserNotifier(),
+            downloadsDirectory: root,
+            stateFileURL: stateFileURL
+        )
         let clipboardService = FakeClipboardService()
         clipboardService.nextSnapshot = .text("local text remains in the clipboard")
         let payload = Data("file".utf8)
@@ -1734,12 +1860,13 @@ final class SyncClipboardTests: XCTestCase {
             text: "report.pdf",
             size: 4
         )
-        coordinator.updatePreferences(syncEnabled: true, showNotifications: false)
-        httpClient.updateConfiguration(ServerConfiguration(
+        let configuration = ServerConfiguration(
             baseURL: URL(string: "https://example.com/sync/")!,
             username: "alice",
             password: "secret"
-        ))
+        )
+        coordinator.updatePreferences(syncEnabled: true, showNotifications: false)
+        httpClient.updateConfiguration(configuration)
         MockURLProtocol.requestHandler = { request in
             let url = try XCTUnwrap(request.url)
             log.append("\(request.httpMethod ?? "GET") \(url.path)")
@@ -1764,7 +1891,60 @@ final class SyncClipboardTests: XCTestCase {
         XCTAssertTrue(first)
         XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("report.pdf")), payload)
 
+        let otherPayload = Data("other".utf8)
+        let otherProfile = makeHistoryRecord(
+            type: .file,
+            hash: Hashing.fileProfileHash(fileName: "other.pdf", fileData: otherPayload),
+            text: "other.pdf",
+            size: Int64(otherPayload.count)
+        )
+        httpClient.updateConfiguration(ServerConfiguration(
+            baseURL: URL(string: "https://other.example.com/sync/")!,
+            username: "alice",
+            password: "secret"
+        ))
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+            if url.path.hasSuffix("/query") {
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    try JSONEncoder().encode([otherProfile])
+                )
+            }
+            return (
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Disposition": "attachment; filename=other.pdf"]
+                )!,
+                otherPayload
+            )
+        }
+        let otherDownloaded = await coordinator.transferClipboardFiles(using: clipboardService, maximumBytes: 1_024)
+        XCTAssertTrue(otherDownloaded)
+
         log.clear()
+        coordinator = SyncCoordinator(
+            httpClient: httpClient,
+            notifier: UserNotifier(),
+            downloadsDirectory: root,
+            stateFileURL: stateFileURL
+        )
+        coordinator.updatePreferences(syncEnabled: true, showNotifications: false)
+        httpClient.updateConfiguration(configuration)
+        MockURLProtocol.requestHandler = { request in
+            let url = try XCTUnwrap(request.url)
+            log.append("\(request.httpMethod ?? "GET") \(url.path)")
+            if url.path.hasSuffix("/query") {
+                return (
+                    HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    try JSONEncoder().encode([profile])
+                )
+            }
+            XCTFail("Persisted receipt should skip the download")
+            return (HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil)!, Data())
+        }
         let second = await coordinator.transferClipboardFiles(using: clipboardService, maximumBytes: 1_024)
         XCTAssertTrue(second)
         XCTAssertEqual(log.snapshot, ["POST /sync/api/history/query"])

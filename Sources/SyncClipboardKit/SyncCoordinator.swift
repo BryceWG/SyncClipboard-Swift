@@ -19,16 +19,22 @@ public final class SyncCoordinator {
         let observedAt: Date
     }
 
-    private struct ImageProvenance {
+    private struct ImageProvenance: Codable {
         let serverIdentity: String
         let profileID: String
         let changeCount: Int
     }
 
-    private struct FileDownloadReceipt {
+    private struct FileDownloadReceipt: Codable {
         let serverIdentity: String
         let profileID: String
         let destination: URL
+    }
+
+    private struct BinarySyncState: Codable {
+        var imageProvenances: [String: ImageProvenance]
+        var fileDownloadReceipts: [String: FileDownloadReceipt]
+        var knownLocalBinaryProfileIDs: Set<String>
     }
 
     private struct LocalHistoryCandidate {
@@ -58,6 +64,7 @@ public final class SyncCoordinator {
     private let httpClient: SyncClipboardHTTPClient
     private let notifier: UserNotifier
     private let downloadsDirectory: URL
+    private let stateFileURL: URL?
 
     private var tracker = SyncSnapshotTracker()
     private var diagnostics = SyncDiagnostics()
@@ -70,18 +77,29 @@ public final class SyncCoordinator {
     private var binaryTransferInFlight = false
     private var binaryTransferWaiters: [CheckedContinuation<Void, Never>] = []
     private var lastPasteboardObservation: PasteboardObservation?
-    private var imageProvenance: ImageProvenance?
-    private var fileDownloadReceipt: FileDownloadReceipt?
+    private var imageProvenances: [String: ImageProvenance] = [:]
+    private var fileDownloadReceipts: [String: FileDownloadReceipt] = [:]
+    private var knownLocalBinaryProfileIDs: Set<String> = []
+    private var binaryStatePersistenceError: String?
     public var diagnosticsHandler: ((SyncDiagnostics) -> Void)?
 
     public init(
         httpClient: SyncClipboardHTTPClient,
         notifier: UserNotifier,
-        downloadsDirectory: URL? = nil
+        downloadsDirectory: URL? = nil,
+        stateFileURL: URL? = nil
     ) {
         self.httpClient = httpClient
         self.notifier = notifier
         self.downloadsDirectory = downloadsDirectory ?? FileTransfer.defaultDownloadsDirectory
+        self.stateFileURL = stateFileURL
+        if let stateFileURL,
+           let data = try? Data(contentsOf: stateFileURL),
+           let state = try? JSONDecoder().decode(BinarySyncState.self, from: data) {
+            imageProvenances = state.imageProvenances
+            fileDownloadReceipts = state.fileDownloadReceipts
+            knownLocalBinaryProfileIDs = state.knownLocalBinaryProfileIDs
+        }
     }
 
     public func updatePreferences(
@@ -113,8 +131,10 @@ public final class SyncCoordinator {
                 changeCount: changeCount,
                 observedAt: observedAt
             )
-            if imageProvenance?.changeCount != changeCount {
-                imageProvenance = nil
+            let previousCount = imageProvenances.count
+            imageProvenances = imageProvenances.filter { $0.value.changeCount == changeCount }
+            if imageProvenances.count != previousCount {
+                persistBinarySyncState()
             }
         }
 
@@ -128,6 +148,12 @@ public final class SyncCoordinator {
             guard let snapshot else { return }
             guard snapshot.type == .text || (snapshot.type == .image && autoSyncImages) else { return }
             if snapshot.type == .image {
+                if let configuration = httpClient.configuration,
+                   let provenance = imageProvenances[serverIdentity(configuration)],
+                   provenance.changeCount == clipboardService.changeCount,
+                   provenance.serverIdentity == serverIdentity(configuration) {
+                    return
+                }
                 try await uploadLocalImage(snapshot)
                 return
             }
@@ -195,7 +221,7 @@ public final class SyncCoordinator {
 
             tracker.markAppliedRemote(snapshot)
             diagnostics.lastPullAt = Date()
-            diagnostics.lastError = nil
+            diagnostics.lastError = binaryStatePersistenceError
             diagnosticsHandler?(diagnostics)
 
             if showNotifications {
@@ -230,6 +256,11 @@ public final class SyncCoordinator {
             guard httpClient.configuration == configuration else {
                 throw SyncClipboardError.serverConfigurationChanged
             }
+            if let profileID = binaryProfileID(type: profile.type, hash: profile.hash),
+               knownLocalBinaryProfileIDs.contains(knownLocalKey(for: profileID, configuration: configuration)) {
+                tracker.markHandledRemote(fingerprint: fingerprint)
+                return true
+            }
             guard profile.hasData, let dataName = profile.dataName else {
                 throw SyncClipboardError.missingTransferData(profile.type)
             }
@@ -259,9 +290,19 @@ public final class SyncCoordinator {
                 try clipboardService.write(snapshot)
                 tracker.markAppliedRemote(.image(pngData: data))
                 tracker.markHandledRemote(fingerprint: fingerprint)
+                if let profileID = binaryProfileID(type: profile.type, hash: profile.hash) {
+                    let identity = serverIdentity(configuration)
+                    imageProvenances[identity] = ImageProvenance(
+                        serverIdentity: identity,
+                        profileID: profileID,
+                        changeCount: clipboardService.changeCount
+                    )
+                    knownLocalBinaryProfileIDs.insert("\(identity)|\(profileID)")
+                }
                 diagnostics.lastPullAt = Date()
-                diagnostics.lastError = nil
+                diagnostics.lastError = binaryStatePersistenceError
                 diagnosticsHandler?(diagnostics)
+                persistBinarySyncState()
                 if showNotifications {
                     notifier.notify(title: NSLocalizedString("Clipboard Updated", bundle: .main, comment: "Notification title"), body: snapshot.previewText)
                 }
@@ -276,7 +317,17 @@ public final class SyncCoordinator {
                     throw SyncClipboardError.serverConfigurationChanged
                 }
                 tracker.markHandledRemote(fingerprint: fingerprint)
-                completeBinaryTransfer(push: false, message: destination.path)
+                if let profileID = binaryProfileID(type: profile.type, hash: profile.hash) {
+                    let identity = serverIdentity(configuration)
+                    fileDownloadReceipts[identity] = FileDownloadReceipt(
+                        serverIdentity: identity,
+                        profileID: profileID,
+                        destination: destination
+                    )
+                    knownLocalBinaryProfileIDs.insert("\(identity)|\(profileID)")
+                }
+                completeBinaryTransfer(push: false, message: destination.path, downloadedFileURL: destination)
+                persistBinarySyncState()
             }
             return true
         } catch {
@@ -338,10 +389,14 @@ public final class SyncCoordinator {
     }
 
     private func uploadSnapshot(_ snapshot: ClipboardSnapshot, mimeType: String) async throws {
-        guard tracker.shouldUpload(snapshot) else { return }
         guard let configuration = httpClient.configuration else {
             throw SyncClipboardError.missingServerConfiguration
         }
+        if let profileID = binaryProfileID(type: snapshot.type, hash: snapshot.hash),
+           knownLocalBinaryProfileIDs.contains(knownLocalKey(for: profileID, configuration: configuration)) {
+            return
+        }
+        guard tracker.shouldUpload(snapshot) else { return }
         if let transferData = snapshot.transferData, let dataName = snapshot.dataName {
             try await httpClient.uploadFile(
                 data: transferData,
@@ -365,9 +420,13 @@ public final class SyncCoordinator {
             throw SyncClipboardError.serverConfigurationChanged
         }
         tracker.markUploaded(snapshot)
+        if let profileID = binaryProfileID(type: snapshot.type, hash: snapshot.hash) {
+            knownLocalBinaryProfileIDs.insert(knownLocalKey(for: profileID, configuration: configuration))
+        }
         diagnostics.lastPushAt = Date()
-        diagnostics.lastError = nil
+        diagnostics.lastError = binaryStatePersistenceError
         diagnosticsHandler?(diagnostics)
+        persistBinarySyncState()
     }
 
     @discardableResult
@@ -390,6 +449,10 @@ public final class SyncCoordinator {
                 actionDate: actionDate,
                 configuration: configuration
             )
+            if let local {
+                knownLocalBinaryProfileIDs.insert(knownLocalKey(for: local.profileID, configuration: configuration))
+                persistBinarySyncState()
+            }
             defer {
                 if case .upload(let candidate) = local {
                     candidate.prepared.cleanup()
@@ -471,7 +534,7 @@ public final class SyncCoordinator {
             return nil
         }
         let identity = serverIdentity(configuration)
-        if let provenance = imageProvenance,
+        if let provenance = imageProvenances[identity],
            provenance.changeCount == changeCount,
            provenance.serverIdentity == identity {
             return .knownRemote(profileID: provenance.profileID)
@@ -569,8 +632,7 @@ public final class SyncCoordinator {
             let profileID = try remote.profileID
             let identity = serverIdentity(configuration)
             if remote.type != .image,
-               let receipt = fileDownloadReceipt,
-               receipt.serverIdentity == identity,
+               let receipt = fileDownloadReceipts[identity],
                receipt.profileID == profileID,
                FileManager.default.fileExists(atPath: receipt.destination.path) {
                 notifyManualSkip(NSLocalizedString("The latest file has already been downloaded.", bundle: .main, comment: "Manual transfer skip message"))
@@ -636,12 +698,14 @@ public final class SyncCoordinator {
                 try clipboardService.write(snapshot)
                 tracker.markAppliedRemote(.image(pngData: data))
                 tracker.markHandledRemote(fingerprint: snapshot.fingerprint)
-                imageProvenance = ImageProvenance(
+                imageProvenances[identity] = ImageProvenance(
                     serverIdentity: identity,
                     profileID: profileID,
                     changeCount: clipboardService.changeCount
                 )
+                knownLocalBinaryProfileIDs.insert("\(identity)|\(profileID)")
                 completeBinaryTransfer(push: false, message: name)
+                persistBinarySyncState()
             } else {
                 let destination = try await FileTransfer.saveDownloadedFile(
                     temporaryURL,
@@ -655,12 +719,14 @@ public final class SyncCoordinator {
                 tracker.markHandledRemote(
                     fingerprint: ProfileDTO(type: remote.type, hash: remote.normalizedHash).fingerprint
                 )
-                fileDownloadReceipt = FileDownloadReceipt(
+                fileDownloadReceipts[identity] = FileDownloadReceipt(
                     serverIdentity: identity,
                     profileID: profileID,
                     destination: destination
                 )
-                completeBinaryTransfer(push: false, message: destination.path)
+                knownLocalBinaryProfileIDs.insert("\(identity)|\(profileID)")
+                completeBinaryTransfer(push: false, message: destination.path, downloadedFileURL: destination)
+                persistBinarySyncState()
             }
             return true
         }
@@ -686,6 +752,42 @@ public final class SyncCoordinator {
         "\(configuration.baseURL.absoluteString)|\(configuration.username)"
     }
 
+    private func binaryProfileID(type: ProfileType, hash: String) -> String? {
+        guard type == .image || type == .file || type == .group, !hash.isEmpty else { return nil }
+        return "\(type.rawValue)-\(hash.uppercased())"
+    }
+
+    private func knownLocalKey(for profileID: String, configuration: ServerConfiguration) -> String {
+        "\(serverIdentity(configuration))|\(profileID)"
+    }
+
+    private func persistBinarySyncState() {
+        guard let stateFileURL else { return }
+        let state = BinarySyncState(
+            imageProvenances: imageProvenances,
+            fileDownloadReceipts: fileDownloadReceipts,
+            knownLocalBinaryProfileIDs: knownLocalBinaryProfileIDs
+        )
+        do {
+            try FileManager.default.createDirectory(
+                at: stateFileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(state).write(to: stateFileURL, options: .atomic)
+            if binaryStatePersistenceError != nil {
+                binaryStatePersistenceError = nil
+                diagnostics.lastError = nil
+                diagnosticsHandler?(diagnostics)
+            }
+        } catch {
+            binaryStatePersistenceError = error.localizedDescription
+            diagnostics.lastError = binaryStatePersistenceError
+            diagnosticsHandler?(diagnostics)
+        }
+    }
+
     private func acquireBinaryTransfer() async {
         guard binaryTransferInFlight else {
             binaryTransferInFlight = true
@@ -702,24 +804,24 @@ public final class SyncCoordinator {
         binaryTransferWaiters.removeFirst().resume()
     }
 
-    private func completeBinaryTransfer(push: Bool, message: String) {
+    private func completeBinaryTransfer(push: Bool, message: String, downloadedFileURL: URL? = nil) {
         if push {
             diagnostics.lastPushAt = Date()
         } else {
             diagnostics.lastPullAt = Date()
         }
-        diagnostics.lastError = nil
+        diagnostics.lastError = binaryStatePersistenceError
         diagnosticsHandler?(diagnostics)
         if showNotifications {
             let title = push
                 ? NSLocalizedString("File Uploaded", bundle: .main, comment: "Notification title")
                 : NSLocalizedString("File Downloaded", bundle: .main, comment: "Notification title")
-            notifier.notify(title: title, body: message)
+            notifier.notify(title: title, body: message, fileURL: downloadedFileURL)
         }
     }
 
     private func notifyManualSkip(_ message: String) {
-        diagnostics.lastError = nil
+        diagnostics.lastError = binaryStatePersistenceError
         diagnosticsHandler?(diagnostics)
         if showNotifications {
             notifier.notify(title: NSLocalizedString("Nothing to Transfer", bundle: .main, comment: "Notification title"), body: message)

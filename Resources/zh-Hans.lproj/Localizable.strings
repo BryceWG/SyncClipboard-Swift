@@ -68,6 +68,8 @@
 "File Sync Failed" = "文件同步失败";
 "File Uploaded" = "文件已上传";
 "File Downloaded" = "文件已下载";
+"Downloaded File Unavailable" = "下载的文件不可用";
+"The downloaded file was moved or deleted." = "下载的文件已被移动或删除。";
 "Nothing to Transfer" = "没有可传输的内容";
 "No remote image or file is available." = "服务器上没有可用的图片或文件。";
 "The latest image or file is already local." = "最新的图片或文件已在本地。";

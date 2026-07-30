@@ -81,7 +81,13 @@ public final class AppModel: ObservableObject {
 
         let notifier = UserNotifier()
         self.realtimeClient = realtimeClient ?? RealtimeClientFactory.make(httpClient: httpClient)
-        self.coordinator = SyncCoordinator(httpClient: httpClient, notifier: notifier)
+        self.coordinator = SyncCoordinator(
+            httpClient: httpClient,
+            notifier: notifier,
+            stateFileURL: SettingsStore.defaultFileURL()
+                .deletingLastPathComponent()
+                .appendingPathComponent("BinarySyncState.json")
+        )
 
         self.clipboardMonitor.onChange = { [weak self] changeCount, observedAt in
             self?.handleLocalClipboardChange(changeCount: changeCount, observedAt: observedAt)
